@@ -10,6 +10,9 @@ from datetime import datetime
 warnings.filterwarnings('ignore')
 
 # Import from AI Chat and Price Prediction scripts
+from security_storage_utils import SecurityManager, StorageManager, FileValidator
+import os
+from dotenv import load_dotenv
 from AI_Chat_Analyst_Script import QASystem
 from Pricing_Func import CarPricePredictor
 
@@ -19,6 +22,17 @@ logger = logging.getLogger(__name__)
 
 class CombinedCarApp:
     def __init__(self):
+        self.setup_session_state()
+        self.setup_page_config()
+        # Load environment variables
+        load_dotenv()
+        
+        # Initialize security and storage managers
+        self.security_manager = SecurityManager()
+        self.storage_manager = StorageManager()
+        self.file_validator = FileValidator()
+        
+        # Setup session state and page config
         self.setup_session_state()
         self.setup_page_config()
         
@@ -31,10 +45,18 @@ class CombinedCarApp:
         # AI Chat state variables
         if 'messages' not in st.session_state:
             st.session_state.messages = []
+            
+        # Add security session state initialization
+        self.security_manager.initialize_session_state()
+        
+        # Storage tracking
+        if 'uploaded_files' not in st.session_state:
+            st.session_state.uploaded_files = {}
         if 'qa_system' not in st.session_state:
             st.session_state.qa_system = None
         if 'chain' not in st.session_state:
             st.session_state.chain = None
+            
             
         # Price Predictor state variables
         if 'predictor' not in st.session_state:
@@ -103,7 +125,7 @@ class CombinedCarApp:
             return False
 
     def render_sidebar(self):
-        """Render the sidebar with navigation and file upload"""
+        """Render the sidebar with navigation and secure file upload"""
         st.sidebar.title("Navigation")
         pages = {
             "Home": "🏠",
@@ -121,7 +143,60 @@ class CombinedCarApp:
         st.sidebar.header("Data Upload")
         uploaded_file = st.sidebar.file_uploader("Upload Car Data CSV", type=['csv'])
         
+        if uploaded_file is not None:
+            try:
+                # Validate file
+                is_valid, message = self.file_validator.validate_file(uploaded_file)
+                
+                if not is_valid:
+                    st.sidebar.error(message)
+                    return page_selection, None
+                
+                # Store file securely
+                file_path = self.storage_manager.upload_file(
+                    uploaded_file, 
+                    folder="car_data"
+                )
+                
+                if file_path:
+                    st.session_state.uploaded_files[uploaded_file.name] = file_path
+                    return page_selection, uploaded_file
+                else:
+                    st.sidebar.error("Error uploading file")
+                    return page_selection, None
+                    
+            except Exception as e:
+                st.sidebar.error(f"Error processing file: {str(e)}")
+                return page_selection, None
+        
         return page_selection, uploaded_file
+    
+    def render_login(self):
+        """Render login interface"""
+        st.title("🔐 Login Required")
+        
+        if not self.security_manager.can_attempt_login():
+            wait_time = (st.session_state.next_attempt - datetime.now()).seconds
+            st.error(f"Too many failed attempts. Please wait {wait_time} seconds.")
+            return False
+        
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        
+        if st.button("Login"):
+            # In production, replace with secure password verification
+            if username == os.getenv("ADMIN_USERNAME") and \
+            self.security_manager.verify_password(password, os.getenv("ADMIN_PASSWORD_HASH")):
+                st.session_state.authenticated = True
+                st.session_state.login_attempts = 0
+                st.success("Login successful!")
+                return True
+            else:
+                self.security_manager.update_failed_login()
+                st.error("Invalid credentials")
+                return False
+                
+        return False
 
     def render_home(self):
         """Render the home page"""
@@ -545,9 +620,27 @@ class CombinedCarApp:
             ))
             fig.update_layout(title='Transmission Types Distribution', height=400)
             container.plotly_chart(fig, use_container_width=True)
+            
+    def __del__(self):
+        """Cleanup when app instance is deleted"""
+        try:
+            self.storage_manager.cleanup_cache()
+        except:
+            pass
 
     def run(self):
         """Main application loop"""
+        
+                # Check authentication
+        if not st.session_state.authenticated:
+            if not self.render_login():
+                return
+        
+        # Check session timeout
+        if self.security_manager.check_session_timeout():
+            st.warning("Session expired. Please login again.")
+            st.session_state.authenticated = False
+            return
         page, uploaded_file = self.render_sidebar()
         
         # Load data if uploaded
@@ -569,6 +662,8 @@ class CombinedCarApp:
             self.render_chat_assistant()
         elif page == "Data Analysis":
             self.render_data_analysis(df)
+            
+    
 
 if __name__ == "__main__":
     app = CombinedCarApp()
