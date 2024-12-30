@@ -463,6 +463,18 @@ class CombinedCarApp:
                         except Exception as e:
                             st.error(f"Error during prediction: {str(e)}")
                             
+                    st.subheader("💭 AI Chat Assistant")
+                    if st.session_state.qa_system is None:
+                        with st.spinner("Initializing chat system..."):
+                            if not self.initialize_qa_system():
+                                st.error("Could not initialize chat system. Please try again.")
+                                return
+                    
+                    # Display Chat History
+                    for msg in st.session_state.messages:
+                        with st.chat_message(msg["role"]):
+                            st.markdown(msg["content"])
+                            
         except Exception as e:
             st.error(f"Error in price prediction: {str(e)}")
 

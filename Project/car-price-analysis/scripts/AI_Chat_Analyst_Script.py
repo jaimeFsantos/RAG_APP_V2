@@ -1279,6 +1279,7 @@ class QASystem(MarketAnalyzer):
         except Exception as e:
             logger.error(f"Error initializing components: {e}")
             return False
+        
     def process_sources(self, sources: List[Dict[str, Union[str, List[str]]]]) -> List[Document]:
         all_documents = []
         self.csv_file_path = None
@@ -1335,8 +1336,9 @@ class QASystem(MarketAnalyzer):
                         page_content=self.predictor_context,
                         metadata={"source": "model_analysis", "type": "predictor_context"}
                     )
-                    all_documents.append(predictor_doc)
-                    
+                    if predictor_doc:
+                        print("Predictor context document created")
+                    all_documents.append(predictor_doc)      
             except Exception as e:
                 logger.error(f"Error loading {file_path}: {str(e)}")
                 
