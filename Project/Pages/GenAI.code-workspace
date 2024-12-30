@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../.."
+		},
+		{
+			"name": "moduletraining",
+			"path": "../.."
+		}
+	],
+	"settings": {
+		"CodeGPT.apiKey": "CodeGPT Plus Beta"
+	}
+}
