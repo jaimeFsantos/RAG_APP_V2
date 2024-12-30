@@ -1,66 +1,78 @@
-from PIL import Image
-import pytesseract
+"""
+AI Chat Analysis System
+
+Implements the core QA system with RAG capabilities and
+market analysis integration.
+
+Environment:
+    AWS EC2 Free Tier
+
+Components:
+    - Document processing and chunking
+    - Vector store management
+    - RAG implementation
+    - Market analysis integration
+    - Visualization generation
+"""
+
+# Core Python imports
+import os
 import io
-import fitz
+import gc
+import json
+import hashlib
+import pickle
+import warnings
+from datetime import datetime, timedelta
+from typing import List, Union, Dict, Any, Optional
+
+# Data manipulation and processing
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
+from sklearn.linear_model import LassoCV, RidgeCV
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, VotingRegressor
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_percentage_error
+from joblib import Parallel, delayed
+from dataclasses import dataclass
+
+# Visualization
+import plotly.graph_objects as go
+
+# Machine Learning Interpretability
+import shap
+
+# Document processing
+from PIL import Image
+import pytesseract
+import fitz  # PyMuPDF
+
+# LangChain components
 from langchain.docstore.document import Document
-import logging
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import Chroma, FAISS
 from langchain.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from langchain_ollama import OllamaEmbeddings, ChatOllama
-from typing import List, Union, Dict
-import os
-from concurrent.futures import ThreadPoolExecutor
-import gc
-import psutil
-import gc
 
-import logging
-from typing import Dict, List, Any, Optional, Union
-import pandas as pd
-import numpy as np
-from datetime import datetime
-import plotly.graph_objects as go
-import json
+# Concurrency
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Pool, cpu_count
+
+# AWS SDK
 import boto3
 from botocore.exceptions import ClientError
-import os
-from dataclasses import dataclass
-from langchain.docstore.document import Document
 
+# System monitoring
+import psutil
 
-# Add to existing imports
-from typing import Dict, List, Union, Any, Optional
-import json
-import plotly.graph_objects as go
-
-from multiprocessing import Pool, cpu_count
-from langchain_community.vectorstores import FAISS
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
-from sklearn.linear_model import LassoCV, RidgeCV
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, VotingRegressor
-import shap
-import plotly.graph_objects as go
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_percentage_error
-from typing import Dict, List, Any
-from joblib import Parallel, delayed
-
-import hashlib
-import pickle
-import os
-import numpy as np
-from typing import Dict, Any, Optional
+# Logging
 import logging
-from datetime import datetime, timedelta
-import json
-import shap
-import warnings
+
+# Suppress warnings
 warnings.filterwarnings('ignore')
 
 

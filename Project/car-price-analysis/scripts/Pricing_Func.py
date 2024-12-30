@@ -1,31 +1,57 @@
+"""
+Car Price Prediction Module
+
+Implements machine learning models for car price prediction with
+integrated market analysis capabilities.
+
+Environment:
+    AWS EC2 Free Tier
+
+Features:
+    - Multiple model training (RF, GBM, XGBoost)
+    - Feature importance analysis using SHAP
+    - Market trend analysis
+    - Price prediction with confidence intervals
+    - Memory-optimized processing for free tier constraints
+"""
+
+# Standard Library Imports
+import os
+import json
+import time
+import hashlib
+import logging
+import datetime
+import warnings
+from functools import lru_cache
+from pathlib import Path
+from typing import Dict, List, Any
+
+# Third-Party Libraries
 import streamlit as st
 import pandas as pd
 import numpy as np
 from joblib import Parallel, delayed
 import joblib
-import os
-from functools import lru_cache
-import hashlib
-import json
-import time
-from pathlib import Path
+
+# Machine Learning and Data Preprocessing
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split, GridSearchCV 
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.linear_model import LassoCV, RidgeCV
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, VotingRegressor
 import xgboost as xgb
-import shap
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_percentage_error
+
+# Visualization
 import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_percentage_error
-import logging
-from typing import Dict, List, Any
-import warnings
+import shap
+
+# Application-Specific Imports
 from AI_Chat_Analyst_Script import QASystem, Document
-import os
-import json
-import datetime
+
+# Ignore warnings for a cleaner output
 warnings.filterwarnings('ignore')
 
 # Set up logging

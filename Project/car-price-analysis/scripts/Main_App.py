@@ -1,32 +1,50 @@
+"""
+Main Application Module
+
+Implements the main application logic and integrates all components
+into a unified interface.
+
+Environment:
+    AWS EC2 Free Tier
+
+Components:
+    - Combined interface for all features
+    - Security integration
+    - File handling
+    - State management
+    - Visualization rendering
+"""
+
+# Standard Library Imports
+import json
+import base64
+import logging
+import warnings
+from datetime import datetime
+from io import BytesIO
+from typing import Dict, Any
+
+# Third-Party Libraries
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import logging
-from typing import Dict, Any
-import warnings
-from datetime import datetime
+
+# Suppress warnings for a cleaner output
 warnings.filterwarnings('ignore')
 
-import plotly.express as px
-import plotly.graph_objects as go
-import json
-import base64
-from io import BytesIO
-
-# Import from AI Chat and Price Prediction scripts
-#from security_storage_utils import SecurityManager, StorageManager, FileValidator
 import os
 from dotenv import load_dotenv
 from AI_Chat_Analyst_Script import QASystem
 from Pricing_Func import CarPricePredictor
+from visualization_dashboard import VisualizationDashboard
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from enhanced_security import (
+from enhanced_security_audit import (
     EnhancedSecurityManager, 
     SecurityConfig,
     SecureStorageService,
@@ -42,7 +60,6 @@ class CombinedCarApp:
             self.temp_storage = "/tmp"
             self.max_file_size_mb = 100
             
-            # Set up basic streamlit state first
             if 'authenticated' not in st.session_state:
                 st.session_state.authenticated = False
             if 'login_attempts' not in st.session_state:
@@ -52,12 +69,11 @@ class CombinedCarApp:
             if 'messages' not in st.session_state:
                 st.session_state.messages = []
 
-            # Initialize security after session state
             self.security_config = SecurityConfig()
             self.security_manager = EnhancedSecurityManager()
             self.storage_service = SecureStorageService(self.security_config)
+            self.dashboard = VisualizationDashboard(os.getenv('S3_BUCKET_NAME'))
             
-            # Set page config last
             self.setup_page_config()
             
             logger.info("App initialized successfully")
@@ -69,7 +85,6 @@ class CombinedCarApp:
     def initialize_security_components(self):
         """Initialize security components if enabled"""
         try:
-            # Initialize or get security components from session state
             if 'security_manager' not in st.session_state:
                 st.session_state.security_manager = self.security_manager
                 st.session_state.storage_service = self.storage_service
@@ -475,7 +490,6 @@ class CombinedCarApp:
                         except Exception as e:
                             st.error(f"Error during prediction: {str(e)}")
                                         
-                # After price estimation section, add AI chat integration
                 if st.session_state.model_trained:
                     st.subheader("💡 AI Insights")
                     
@@ -690,6 +704,19 @@ class CombinedCarApp:
         )
         
         container.plotly_chart(fig, use_container_width=True)
+        
+    def render_data_analysis(self, df):
+        if df is None:
+            st.warning("Please upload data to view analytics.")
+            return
+            
+        # Upload data to S3 if needed
+        data_key = f"temp/car_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        try:
+            self.storage_service.upload_file(df.to_csv(index=False), data_key)
+            self.dashboard.render_dashboard(data_key)
+        except Exception as e:
+            st.error(f"Error rendering dashboard: {str(e)}")
 
     def _render_market_analysis(self, data, container):
         """Render market analysis visualization"""
