@@ -26,9 +26,18 @@ from Pricing_Func import CarPricePredictor
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+from enhanced_security import (
+    EnhancedSecurityManager, 
+    SecureStorageService, 
+    AuditEventType,
+    audit_trail
+)
+
 class CombinedCarApp:
     def __init__(self):
         try:
+            self.security_manager = EnhancedSecurityManager()
+            self.storage_service = SecureStorageService()
             # Initialize core components
             self.setup_basic_session_state()
             self.setup_page_config()
@@ -275,6 +284,7 @@ class CombinedCarApp:
             To begin, please upload your data using the sidebar.
         """)
 
+    @audit_trail(AuditEventType.MODEL_TRAINING)
     def render_price_predictor(self, df: pd.DataFrame):
         """Render the price predictor interface from Pricing_Func"""
         st.header("💰 Car Price Predictor")
@@ -509,6 +519,7 @@ class CombinedCarApp:
         except Exception as e:
             st.error(f"Error generating insights: {str(e)}")                # After price estimation section, add AI chat integration
 
+    @audit_trail(AuditEventType.CHAT_INTERACTION)
     def render_chat_assistant(self):
         """Render the AI chat assistant interface with visualizations"""
         st.header("💭 AI Chat Assistant")

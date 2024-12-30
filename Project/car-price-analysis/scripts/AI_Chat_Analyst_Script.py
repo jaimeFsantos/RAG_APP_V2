@@ -424,7 +424,7 @@ def compute_shap_values(model, input_data, cache: SHAPCache) -> np.ndarray:
 
 #############################################################################################################
 class DocumentLoader:
-    def __init__(self, batch_size: int = 1000):
+    def __init__(self, batch_size: int = 500):
         self.batch_size = batch_size
         self.ocr_failures = []  # Track OCR failures
         
@@ -766,7 +766,7 @@ class CarPricePredictor:
         if model_type == 'rf':
             base_model = RandomForestRegressor(
                 random_state=42,
-                n_jobs=-1 if not self.fast_mode else 1,
+                n_jobs=2 if not self.fast_mode else 1,
                 warm_start=True  # Enable warm start for incremental training
             )
         elif model_type == 'gbm':
@@ -787,7 +787,7 @@ class CarPricePredictor:
             n_iter=n_pre_iter,
             cv=3 if self.fast_mode else 5,
             scoring='neg_mean_squared_error',
-            n_jobs=-1,
+            n_jobs=2,
             random_state=42
         )
         pre_search.fit(X, y)
@@ -816,7 +816,7 @@ class CarPricePredictor:
             param_grid=refined_param_grid,
             cv=3 if self.fast_mode else 5,
             scoring='neg_mean_squared_error',
-            n_jobs=-1,
+            n_jobs=2,
             verbose=0
         )
 
@@ -997,7 +997,7 @@ class CarPricePredictor:
             return None
 
         if model_type == 'rf':
-            base_model = RandomForestRegressor(random_state=42, n_jobs=-1 if not self.fast_mode else 1)
+            base_model = RandomForestRegressor(random_state=42, n_jobs=2 if not self.fast_mode else 1)
         elif model_type == 'gbm':
             base_model = GradientBoostingRegressor(random_state=42)
         #elif model_type == 'xgb':
@@ -1011,7 +1011,7 @@ class CarPricePredictor:
         grid_search = GridSearchCV(
             estimator=base_model,
             param_grid=param_grid,
-            n_jobs=-1,
+            n_jobs=2,
             cv=3 if self.fast_mode else 5,
             scoring='neg_mean_squared_error',
             verbose=1
@@ -1041,7 +1041,7 @@ class CarPricePredictor:
 #                st.error(f"Error training {model_type}: {e}")
                 return model_type, None
 
-        results = Parallel(n_jobs=-1)(delayed(train_model)(model) for model in self.selected_models)
+        results = Parallel(n_jobs=1)(delayed(train_model)(model) for model in self.selected_models)
         self.best_models = {name: model for name, model in results if model is not None}
 
         if len(self.best_models) > 1:
@@ -1520,6 +1520,7 @@ class QASystem(MarketAnalyzer):
             return False
         
     def process_sources(self, sources: List[Dict[str, Union[str, List[str]]]]) -> List[Document]:
+        gc.collect()
         all_documents = []
         self.csv_file_path = None
         

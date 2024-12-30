@@ -1,8 +1,3 @@
-"""
-Enhanced security implementation for car price analysis application.
-Includes authentication, secure storage, audit trail, and encryption.
-"""
-
 import os
 import boto3
 import json
