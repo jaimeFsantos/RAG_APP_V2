@@ -16,7 +16,7 @@ import base64
 from io import BytesIO
 
 # Import from AI Chat and Price Prediction scripts
-from security_storage_utils import SecurityManager, StorageManager, FileValidator
+#from security_storage_utils import SecurityManager, StorageManager, FileValidator
 import os
 from dotenv import load_dotenv
 from AI_Chat_Analyst_Script import QASystem
@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 
 from enhanced_security import (
     EnhancedSecurityManager, 
-    SecureStorageService, 
+    SecurityConfig,
+    SecureStorageService,
     AuditEventType,
     audit_trail
 )
@@ -36,74 +37,69 @@ from enhanced_security import (
 class CombinedCarApp:
     def __init__(self):
         try:
+            # Basic initializations
+            load_dotenv()
+            self.temp_storage = "/tmp"
+            self.max_file_size_mb = 100
+            
+            # Set up basic streamlit state first
+            if 'authenticated' not in st.session_state:
+                st.session_state.authenticated = False
+            if 'login_attempts' not in st.session_state:
+                st.session_state.login_attempts = 0
+            if 'current_page' not in st.session_state:
+                st.session_state.current_page = "Home"
+            if 'messages' not in st.session_state:
+                st.session_state.messages = []
+
+            # Initialize security after session state
+            self.security_config = SecurityConfig()
             self.security_manager = EnhancedSecurityManager()
-            self.storage_service = SecureStorageService()
-            # Initialize core components
-            self.setup_basic_session_state()
+            self.storage_service = SecureStorageService(self.security_config)
+            
+            # Set page config last
             self.setup_page_config()
             
-            # Initialize security components only if needed
-            if self.should_initialize_security():
-                self.initialize_security_components()
+            logger.info("App initialized successfully")
+            
         except Exception as e:
+            logger.error(f"Init error: {e}", exc_info=True)
             st.error(f"Error initializing app: {str(e)}")
-            logging.error(f"Initialization error: {str(e)}")
-    
-    def should_initialize_security(self):
-        """Check if security components should be initialized"""
-        return os.getenv('ENABLE_SECURITY', 'false').lower() == 'true'
-    
-    def setup_basic_session_state(self):
-        """Initialize basic session state variables"""
-        # Common state variables
-        if 'current_page' not in st.session_state:
-            st.session_state.current_page = "Home"
             
-        # AI Chat state variables
-        if 'messages' not in st.session_state:
-            st.session_state.messages = []
-            
-        if 'qa_system' not in st.session_state:
-            st.session_state.qa_system = None
-            
-        if 'chain' not in st.session_state:
-            st.session_state.chain = None
-            
-        # Price Predictor state variables
-        if 'predictor' not in st.session_state:
-            st.session_state.predictor = None
-            
-        if 'analyst' not in st.session_state:
-            st.session_state.analyst = None
-            
-        if 'metrics' not in st.session_state:
-            st.session_state.metrics = {}
-            
-        if 'model_trained' not in st.session_state:
-            st.session_state.model_trained = False
-    
     def initialize_security_components(self):
         """Initialize security components if enabled"""
         try:
-            # Load environment variables
-            load_dotenv()
-            
-            # Initialize security managers
-            self.security_manager = SecurityManager()
-            self.storage_manager = StorageManager()
-            self.file_validator = FileValidator()
+            # Initialize or get security components from session state
+            if 'security_manager' not in st.session_state:
+                st.session_state.security_manager = self.security_manager
+                st.session_state.storage_service = self.storage_service
             
             # Initialize security session state
-            st.session_state.authenticated = False
-            st.session_state.login_attempts = 0
-            st.session_state.last_activity = datetime.now()
-            st.session_state.uploaded_files = {}
+            if 'authenticated' not in st.session_state:
+                st.session_state.authenticated = False
+                st.session_state.login_attempts = 0
+                st.session_state.last_activity = datetime.now()
+                st.session_state.uploaded_files = {}
             
             logger.info("Security components initialized successfully")
                     
         except Exception as e:
             logger.error(f"Security initialization error: {str(e)}")
             st.error("Error initializing security components. Running in limited mode.")
+            
+    def cleanup_temp_files(self):
+        """Cleanup temporary files periodically"""
+        try:
+            for file in os.listdir(self.temp_storage):
+                if file.startswith('car_analysis_'):
+                    os.remove(os.path.join(self.temp_storage, file))
+        except Exception as e:
+            logger.error(f"Error cleaning temp files: {e}")
+    
+    def should_initialize_security(self):
+        """Check if security components should be initialized"""
+        return os.getenv('ENABLE_SECURITY', 'false').lower() == 'true'
+
             
     def setup_page_config(self):
         """Configure the Streamlit page"""

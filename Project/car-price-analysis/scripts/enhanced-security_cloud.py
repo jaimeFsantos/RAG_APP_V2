@@ -1,3 +1,8 @@
+"""
+Enhanced security implementation for car price analysis application.
+Includes authentication, secure storage, audit trail, and encryption.
+"""
+
 import os
 import boto3
 import json
@@ -42,8 +47,6 @@ class AuditEvent:
     status: str
     session_id: str
 
-# In enhanced_security.py
-
 class SecurityConfig:
     """Security configuration settings"""
     def __init__(self):
@@ -56,10 +59,10 @@ class SecurityConfig:
         self.ALLOWED_EXTENSIONS = {'.csv', '.pdf', '.xlsx'}
         self.AUDIT_RETENTION_DAYS = 90
         
-        # AWS Configuration - Now instance variables
-        self.aws_region = os.getenv('AWS_REGION', 'us-east-1')
-        self.s3_bucket = os.getenv('S3_BUCKET_NAME')
-        self.kms_key_id = os.getenv('KMS_KEY_ID')
+        # AWS Configuration
+        self.AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
+        self.S3_BUCKET = os.getenv('S3_BUCKET_NAME')
+        self.KMS_KEY_ID = os.getenv('KMS_KEY_ID')
         
         # Generate encryption key if not exists
         if not os.getenv('FERNET_KEY'):
@@ -68,10 +71,27 @@ class SecurityConfig:
 
 class EncryptionService:
     """Handles data encryption and decryption"""
-    def __init__(self, security_config: SecurityConfig):
-        self.config = security_config
+    def __init__(self):
         self.fernet = Fernet(os.getenv('FERNET_KEY').encode())
-        self.kms_client = boto3.client('kms', region_name=self.config.aws_region)
+        self.kms_client = boto3.client('kms', region_name=SecurityConfig.AWS_REGION)
+    
+    def encrypt_data(self, data: bytes) -> bytes:
+        """Encrypt data using Fernet encryption"""
+        return self.fernet.encrypt(data)
+    
+    def decrypt_data(self, encrypted_data: bytes) -> bytes:
+        """Decrypt Fernet-encrypted data"""
+        return self.fernet.decrypt(encrypted_data)
+    
+    def encrypt_file(self, file_path: str) -> str:
+        """Encrypt a file and return the encrypted file path"""
+        with open(file_path, 'rb') as file:
+            encrypted_data = self.encrypt_data(file.read())
+        
+        encrypted_path = f"{file_path}.encrypted"
+        with open(encrypted_path, 'wb') as file:
+            file.write(encrypted_data)
+        return encrypted_path
 
 class AuditLogger:
     """Handles audit logging with AWS integration"""
@@ -90,36 +110,6 @@ class AuditLogger:
         if os.getenv('ENABLE_CLOUDWATCH', 'false').lower() == 'true':
             cloudwatch_handler = self._setup_cloudwatch_handler()
             self.logger.addHandler(cloudwatch_handler)
-    
-class AuditLogger:
-    """Handles audit logging with AWS integration"""
-    def __init__(self, security_config: SecurityConfig):
-        self.config = security_config
-        self.dynamodb = boto3.resource('dynamodb', region_name=self.config.aws_region)
-        self.table = self.dynamodb.Table('car_app_audit_logs')
-        self._setup_logging()
-    
-    def _setup_logging(self):
-        """Configure logging handlers"""
-        self.logger = logging.getLogger('audit_logger')
-        self.logger.setLevel(logging.INFO)
-        
-        # Add CloudWatch handler if available
-        if os.getenv('ENABLE_CLOUDWATCH', 'false').lower() == 'true':
-            cloudwatch_handler = self._setup_cloudwatch_handler()
-            self.logger.addHandler(cloudwatch_handler)
-    
-    def _setup_cloudwatch_handler(self):
-        """Set up CloudWatch logging handler"""
-        try:
-            cloudwatch_client = boto3.client(
-                'logs',
-                region_name=self.config.aws_region
-            )
-            return cloudwatch_client
-        except Exception as e:
-            self.logger.error(f"Failed to setup CloudWatch handler: {e}")
-            return None
     
     def log_event(self, event: AuditEvent):
         """Log an audit event to DynamoDB and CloudWatch"""
@@ -145,26 +135,6 @@ class AuditLogger:
         except Exception as e:
             self.logger.error(f"Error logging audit event: {str(e)}")
             raise
-
-    def get_user_activity(self, user_id: str, start_date: datetime = None) -> List[Dict]:
-        """Retrieve user activity logs"""
-        try:
-            if not start_date:
-                start_date = datetime.now() - timedelta(days=self.config.AUDIT_RETENTION_DAYS)
-            
-            response = self.table.query(
-                KeyConditionExpression='user_id = :uid AND timestamp >= :start',
-                ExpressionAttributeValues={
-                    ':uid': user_id,
-                    ':start': start_date.isoformat()
-                }
-            )
-            
-            return response.get('Items', [])
-            
-        except Exception as e:
-            self.logger.error(f"Error retrieving user activity: {str(e)}")
-            return []
 
     def get_user_activity(self, user_id: str, start_date: datetime = None) -> List[Dict]:
         """Retrieve user activity logs"""

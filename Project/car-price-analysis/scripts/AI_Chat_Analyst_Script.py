@@ -17,6 +17,8 @@ from typing import List, Union, Dict
 import os
 from concurrent.futures import ThreadPoolExecutor
 import gc
+import psutil
+import gc
 
 import logging
 from typing import Dict, List, Any, Optional, Union
@@ -1378,7 +1380,8 @@ class BalancedRetriever:
         return final_docs
 
 class QASystem(MarketAnalyzer):
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 25):
+    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 25,  memory_limit_mb: int = 512):
+        self.memory_limit = memory_limit_mb * 1024 * 1024  # Convert to bytes
         super().__init__()  # Initialize MarketAnalyzer
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -1392,6 +1395,12 @@ class QASystem(MarketAnalyzer):
         self.data_df = None
         self.document_tracer = DocumentTracer()
         self.chain = None  # Initialize chain as None
+    def _check_memory(self):
+        """Monitor memory usage and trigger cleanup if needed"""
+        if psutil.Process().memory_info().rss > self.memory_limit:
+            gc.collect()
+            return False
+        return True
         
     def _determine_visualization_type(self, query: str) -> str:
         """
@@ -1520,6 +1529,10 @@ class QASystem(MarketAnalyzer):
             return False
         
     def process_sources(self, sources: List[Dict[str, Union[str, List[str]]]]) -> List[Document]:
+        # Add memory check before processing
+        if not self._check_memory():
+            logger.warning("Memory limit reached, performing cleanup")
+            gc.collect()
         gc.collect()
         all_documents = []
         self.csv_file_path = None
