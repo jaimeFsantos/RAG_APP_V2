@@ -9,6 +9,12 @@ import warnings
 from datetime import datetime
 warnings.filterwarnings('ignore')
 
+import plotly.express as px
+import plotly.graph_objects as go
+import json
+import base64
+from io import BytesIO
+
 # Import from AI Chat and Price Prediction scripts
 from security_storage_utils import SecurityManager, StorageManager, FileValidator
 import os
@@ -296,7 +302,7 @@ class CombinedCarApp:
             
             # Fill NA values for categorical columns
             categorical_columns = ['make', 'model', 'trim', 'body', 'transmission', 
-                                 'state', 'color', 'interior', 'seller']
+                                'state', 'color', 'interior', 'seller']
             for col in categorical_columns:
                 if col in df.columns:
                     df[col] = df[col].fillna('unknown')
@@ -462,21 +468,46 @@ class CombinedCarApp:
                             
                         except Exception as e:
                             st.error(f"Error during prediction: {str(e)}")
-                            
-                    st.subheader("💭 AI Chat Assistant")
-                    if st.session_state.qa_system is None:
-                        with st.spinner("Initializing chat system..."):
-                            if not self.initialize_qa_system():
-                                st.error("Could not initialize chat system. Please try again.")
-                                return
+                                        
+                # After price estimation section, add AI chat integration
+                if st.session_state.model_trained:
+                    st.subheader("💡 AI Insights")
                     
-                    # Display Chat History
-                    for msg in st.session_state.messages:
-                        with st.chat_message(msg["role"]):
-                            st.markdown(msg["content"])
-                            
+                    # Initialize AI chat if needed
+                    if 'qa_system' not in st.session_state:
+                        st.session_state.qa_system = QASystem()
+                        
+                    # Add predictor outputs to context
+                    if 'last_prediction_result' in st.session_state:
+                        st.session_state.qa_system.process_predictor_outputs(
+                            st.session_state.last_prediction_result
+                        )
+                    
+                    # Chat interface
+                    query = st.text_input(
+                        "Ask about this prediction or market insights:",
+                        placeholder="E.g., What factors influenced this price prediction?"
+                    )
+                    
+                    if query:
+                        with st.spinner("Analyzing..."):
+                            try:
+                                # Get response with visualization
+                                response = st.session_state.qa_system.generate_response(query)
+                                
+                                # Display text response
+                                st.markdown("### Analysis")
+                                st.markdown(response['text_response'])
+                                
+                                # Display visualization if available
+                                if response.get('visualization'):
+                                    st.markdown("### Visualization")
+                                    fig = json.loads(response['visualization']['plot'])
+                                    st.plotly_chart(go.Figure(fig), use_container_width=True)
+                            except Exception as e:
+                                st.error(f"Error generating insights: {str(e)}")   
         except Exception as e:
-            st.error(f"Error in price prediction: {str(e)}")
+            st.error(f"Error generating insights: {str(e)}")                # After price estimation section, add AI chat integration
 
     def render_chat_assistant(self):
         """Render the AI chat assistant interface with visualizations"""

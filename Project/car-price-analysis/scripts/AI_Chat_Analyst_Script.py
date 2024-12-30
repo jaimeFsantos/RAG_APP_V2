@@ -18,6 +18,25 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 import gc
 
+import logging
+from typing import Dict, List, Any, Optional, Union
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import plotly.graph_objects as go
+import json
+import boto3
+from botocore.exceptions import ClientError
+import os
+from dataclasses import dataclass
+from langchain.docstore.document import Document
+
+
+# Add to existing imports
+from typing import Dict, List, Union, Any, Optional
+import json
+import plotly.graph_objects as go
+
 from multiprocessing import Pool, cpu_count
 from langchain_community.vectorstores import FAISS
 from sklearn.preprocessing import StandardScaler
@@ -50,6 +69,116 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+
+class VisualizationGenerator:
+    """
+    Handles generation of visualizations for different query types.
+    """
+    
+    @staticmethod
+    def create_price_trends_viz(data: dict) -> str:
+        """
+        Create price trends visualization.
+        
+        Args:
+            data: Dictionary containing date and price data
+            
+        Returns:
+            str: JSON string of the plotly figure
+        """
+        fig = go.Figure()
+        dates = list(data.keys())
+        prices = list(data.values())
+        
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=prices,
+            mode='lines+markers',
+            name='Average Price'
+        ))
+        
+        fig.update_layout(
+            title='Price Trends Over Time',
+            xaxis_title='Date',
+            yaxis_title='Average Price ($)',
+            height=400
+        )
+        
+        return fig.to_json()
+
+    @staticmethod
+    def create_feature_importance_viz(data: dict) -> str:
+        """
+        Create feature importance visualization.
+        
+        Args:
+            data: Dictionary of features and their importance values
+            
+        Returns:
+            str: JSON string of the plotly figure
+        """
+        # Sort features by absolute importance
+        sorted_features = dict(sorted(
+            data.items(),
+            key=lambda x: abs(x[1]),
+            reverse=True
+        )[:10])
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            y=list(sorted_features.keys()),
+            x=list(sorted_features.values()),
+            orientation='h'
+        ))
+        
+        fig.update_layout(
+            title='Top 10 Feature Importance',
+            xaxis_title='Importance',
+            yaxis_title='Feature',
+            height=400
+        )
+        
+        return fig.to_json()
+
+    @staticmethod
+    def create_market_analysis_viz(data: dict) -> str:
+        """
+        Create market analysis visualization.
+        
+        Args:
+            data: Dictionary containing market analysis data
+            
+        Returns:
+            str: JSON string of the plotly figure
+        """
+        fig = go.Figure()
+        
+        if 'popular_colors' in data:
+            colors = data['popular_colors']
+            fig.add_trace(go.Bar(
+                x=list(colors.keys()),
+                y=list(colors.values()),
+                name='Color Distribution'
+            ))
+            
+        if 'transmission_split' in data:
+            trans = data['transmission_split']
+            fig.add_trace(go.Bar(
+                x=list(trans.keys()),
+                y=list(trans.values()),
+                name='Transmission Distribution'
+            ))
+            
+        fig.update_layout(
+            title='Market Distribution Analysis',
+            xaxis_title='Category',
+            yaxis_title='Count',
+            height=400,
+            barmode='group'
+        )
+        
+        return fig.to_json()
 
 
 class PreCalculationPipeline:
@@ -1263,6 +1392,116 @@ class QASystem(MarketAnalyzer):
         self.data_df = None
         self.document_tracer = DocumentTracer()
         self.chain = None  # Initialize chain as None
+        
+    def _determine_visualization_type(self, query: str) -> str:
+        """
+        Determine the type of visualization needed based on the query.
+        
+        Args:
+            query (str): The user's query string
+            
+        Returns:
+            str: Visualization type ('price_trends', 'feature_importance', 'market_analysis', or None)
+        """
+        keywords = {
+            'price_trends': ['trend', 'price', 'cost', 'value', 'historical'],
+            'feature_importance': ['feature', 'factor', 'impact', 'influence'],
+            'market_analysis': ['market', 'segment', 'compare', 'analysis']
+        }
+        
+        query = query.lower()
+        for viz_type, words in keywords.items():
+            if any(word in query for word in words):
+                return viz_type
+        return None
+
+    def generate_visualization(self, query: str, viz_type: str) -> Optional[Dict]:
+        """
+        Generate visualization data based on query type and context.
+        
+        Args:
+            query (str): The user's query
+            viz_type (str): Type of visualization to generate
+            
+        Returns:
+            Optional[Dict]: Visualization data if available, None otherwise
+        """
+        try:
+            viz_generator = VisualizationGenerator()
+            
+            if viz_type == 'price_trends':
+                if self.data_df is not None:
+                    data = self.data_df.copy()
+                    if 'saledate' in data.columns:
+                        data['date'] = pd.to_datetime(data['saledate'])
+                        trends = data.groupby(data['date'].dt.strftime('%Y-%m'))[['sellingprice']].mean()
+                        viz_data = trends.to_dict()['sellingprice']
+                        return {
+                            'type': 'price_trends',
+                            'plot': viz_generator.create_price_trends_viz(viz_data)
+                        }
+                        
+            elif viz_type == 'feature_importance':
+                if hasattr(self, 'predictor') and hasattr(self.predictor, 'best_models'):
+                    if 'rf' in self.predictor.best_models:
+                        model = self.predictor.best_models['rf']
+                        importance = dict(zip(
+                            self.predictor.feature_columns,
+                            model.feature_importances_
+                        ))
+                        return {
+                            'type': 'feature_importance',
+                            'plot': viz_generator.create_feature_importance_viz(importance)
+                        }
+                        
+            elif viz_type == 'market_analysis':
+                if hasattr(self, 'market_insights'):
+                    market_data = self.market_insights.get('market_summary', {})
+                    return {
+                        'type': 'market_analysis',
+                        'plot': viz_generator.create_market_analysis_viz(market_data)
+                    }
+                    
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error generating visualization: {e}")
+            return None
+    def process_predictor_outputs(self, prediction_result: Dict[str, Any]):
+        """
+        Process and store predictor outputs for context enhancement.
+        
+        Args:
+            prediction_result: Dictionary containing prediction results
+        """
+        try:
+            if prediction_result:
+                context = []
+                
+                # Format prediction details
+                context.append(f"""
+                Price Prediction Analysis:
+                - Predicted Price: ${prediction_result['predicted_price']:,.2f}
+                - Confidence Range: ${prediction_result['prediction_interval'][0]:,.2f} to ${prediction_result['prediction_interval'][1]:,.2f}
+                - Model Confidence: {(1 - prediction_result['mape']) * 100:.1f}%
+                """)
+                
+                # Create document from context
+                doc = Document(
+                    page_content="\n".join(context),
+                    metadata={"source": "predictor_output", "type": "prediction_analysis"}
+                )
+                
+                # Store predictor context
+                self.predictor_context = "\n".join(context)
+                
+                # Update vector store with new document if it exists
+                if self.vector_db:
+                    self.vector_db.add_documents([doc])
+                    logger.info("Added predictor outputs to vector store")
+                    
+        except Exception as e:
+            logger.error(f"Error processing predictor outputs: {e}")
 
     def initialize_components(self):
         """Initialize all required components"""
@@ -1343,6 +1582,40 @@ class QASystem(MarketAnalyzer):
                 logger.error(f"Error loading {file_path}: {str(e)}")
                 
         return all_documents
+    
+    def generate_response(self, query: str) -> Dict[str, Any]:
+        """
+        Generate a response including text and visualization if applicable.
+        
+        Args:
+            query (str): The user's question
+            
+        Returns:
+            Dict[str, Any]: Response containing text and optional visualization data
+        """
+        try:
+            # Determine visualization type
+            viz_type = self._determine_visualization_type(query)
+            
+            # Get text response
+            response = self.chain.invoke(query)
+            
+            # Generate visualization if applicable
+            viz_data = None
+            if viz_type:
+                viz_data = self.generate_visualization(query, viz_type)
+                
+            return {
+                'text_response': response,
+                'visualization': viz_data
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating response: {e}")
+            return {
+                'text_response': f"Error generating response: {str(e)}",
+                'visualization': None
+            }
 
     def _create_market_analysis_documents(self) -> List[Document]:
         """Create documents from market analysis insights with improved error handling"""
@@ -1449,9 +1722,25 @@ class QASystem(MarketAnalyzer):
         except Exception as e:
             logger.error(f"Error in SHAP analysis: {str(e)}")
             return "SHAP analysis failed"
+
     def create_chain(self, sources: List[Dict[str, Union[str, List[str]]]]):
-        """Create enhanced QA chain with integrated market analysis context"""
+        """
+        Create enhanced QA chain with integrated market analysis and predictor context.
+        
+        Args:
+            sources: List of source documents
+            
+        Returns:
+            Chain: The configured QA chain
+        """
         try:
+            # Process predictor outputs if available
+            if hasattr(self, 'predictor_context') and self.predictor_context:
+                sources.append({
+                    "content": self.predictor_context,
+                    "metadata": {"source": "predictor_output", "type": "prediction_analysis"}
+                })
+            
             # Process documents and generate market analysis
             documents = self.process_sources(sources)
             
@@ -1487,8 +1776,8 @@ class QASystem(MarketAnalyzer):
             base_retriever = self.vector_db.as_retriever(search_kwargs={"k": 10})
             balanced_retriever = BalancedRetriever(base_retriever, min_docs_per_type=2)
             
-            # Enhanced template
-            template = """Analyze the following question using both document context and market analysis:
+            # Enhanced template with visualization support
+            template = """Analyze the following question using available context and market analysis:
 
     Question: {question}
 
@@ -1499,11 +1788,15 @@ class QASystem(MarketAnalyzer):
     1. Addresses the specific question
     2. Incorporates relevant market trends and patterns
     3. Provides specific data points and statistics when available
-    4. Offers actionable insights based on market analysis
-    5. Considers both general trends and segment-specific patterns
+    4. Offers actionable insights based on the analysis
+    5. References any prediction results if relevant
+    6. Suggests visual patterns or trends that might be helpful
 
-    Develop the response with a focus on clarity, depth, and relevance to the question and can consider similar queries too it.
-    Use specific numbers, percentages, and trends from the analysis when relevant to support your response."""
+    Response format:
+    - Start with a direct answer to the question
+    - Include supporting data and analysis
+    - End with actionable insights or recommendations
+    """
             
             prompt = ChatPromptTemplate.from_template(template)
             
@@ -1522,169 +1815,316 @@ class QASystem(MarketAnalyzer):
             return chain
 
         except Exception as e:
-            logger.error(f"Error creating QA chain: {str(e)}")
+            logger.error(f"Error creating QA chain: {e}")
             return None
-        
     
 
-class OptimizedQASystem(QASystem):
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):
-        super().__init__(chunk_size, chunk_overlap)
-        self.pre_calc_pipeline = PreCalculationPipeline()
-        self.processed_data = None
-        self.feature_cache = {}
-        
-    def _initialize_ml_components(self, df):
-        """Initialize ML components with pre-calculation"""
-        try:
-            # Pre-process data using pipeline
-            features_data = self.pre_calc_pipeline.preprocess_data(df, self.predictor)
-            self.processed_data = features_data['processed_data']
-            features = features_data['features']
-            
-            # Prepare train-test split
-            X = features.drop('sellingprice', axis=1)
-            y = features['sellingprice']
-            
-            # Use stratified sampling for better representation
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, 
-                test_size=0.2, 
-                random_state=42,
-                stratify=pd.qcut(y, q=5, labels=False, duplicates='drop')
-            )
-            
-            # Train models in parallel
-            def train_model_parallel(model_name):
-                try:
-                    if model_name in ['rf', 'gbm']:
-                        model = self.predictor.tune_model(model_name, X_train, y_train)
-                    elif model_name == 'lasso':
-                        model = LassoCV(cv=3, random_state=42).fit(X_train, y_train)
-                    elif model_name == 'ridge':
-                        model = RidgeCV(cv=3).fit(X_train, y_train)
-                    return model_name, model
-                except Exception as e:
-                    logger.error(f"Error training {model_name}: {str(e)}")
-                    return model_name, None
-            
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                model_results = list(executor.map(
-                    lambda m: train_model_parallel(m),
-                    self.predictor.selected_models
-                ))
-            
-            self.predictor.best_models = {
-                name: model for name, model in model_results if model is not None
-            }
-            
-            # Pre-calculate SHAP values for feature importance
-            if 'rf' in self.predictor.best_models:
-                self._precalculate_shap_values(X_test)
-            
-            return X_test, y_test
-            
-        except Exception as e:
-            logger.error(f"Error in ML initialization: {str(e)}")
-            raise
-            
-    def _precalculate_shap_values(self, X_test):
-        """Pre-calculate and cache SHAP values"""
-        try:
-            sample_size = min(1000, len(X_test))
-            X_sample = X_test.sample(n=sample_size, random_state=42)
-            
-            shap_values = compute_shap_values(
-                self.predictor.best_models['rf'],
-                X_sample,
-                self.pre_calc_pipeline.shap_cache
-            )
-            
-            # Cache feature importance
-            feature_importance = pd.DataFrame({
-                'feature': X_test.columns,
-                'importance': np.abs(shap_values).mean(0)
-            }).sort_values('importance', ascending=False)
-            
-            self.feature_cache['importance'] = feature_importance
-            
-        except Exception as e:
-            logger.error(f"Error pre-calculating SHAP values: {str(e)}")
-            
-    def process_sources(self, sources: List[Dict[str, Union[str, List[str]]]]) -> List[Document]:
-        """Enhanced source processing with pre-calculation pipeline"""
-        all_documents = []
-        
-        for source in sources:
-            if source["type"].lower() == "csv":
-                # Load and pre-process CSV data
-                self.data_df = pd.read_csv(source["path"])
-                X_test, y_test = self._initialize_ml_components(self.data_df)
-                
-                # Generate and evaluate predictions
-                metrics, _ = self.predictor.evaluate(X_test, y_test)
-                
-                # Create enhanced context documents
-                self._create_enhanced_context_documents(metrics, all_documents)
-            else:
-                # Process other document types normally
-                documents = super().process_sources([source])
-                all_documents.extend(documents)
-        
-        return all_documents
-        
-    def _create_enhanced_context_documents(self, metrics, all_documents):
-        """Create enhanced context documents with pre-calculated insights"""
-        # Add model performance document
-        performance_summary = self._generate_performance_summary(metrics)
-        all_documents.append(Document(
-            page_content=performance_summary,
-            metadata={"source": "model_analysis", "type": "model_performance"}
-        ))
-        
-        # Add feature importance document if available
-        if 'importance' in self.feature_cache:
-            feature_importance = self.feature_cache['importance']
-            importance_summary = "Feature Importance Analysis:\n"
-            for _, row in feature_importance.head(10).iterrows():
-                importance_summary += f"- {row['feature']}: {row['importance']:.4f}\n"
-                
-            all_documents.append(Document(
-                page_content=importance_summary,
-                metadata={"source": "model_analysis", "type": "feature_importance"}
-            ))
-            
-        # Add market insights document
-        if hasattr(self, 'market_insights'):
-            market_summary = self._generate_market_summary()
-            all_documents.append(Document(
-                page_content=market_summary,
-                metadata={"source": "market_analysis", "type": "market_insights"}
-            ))
+@dataclass
+class PredictionContext:
+    """Data class for storing prediction context"""
+    prediction_data: Dict[str, Any]
+    features: Dict[str, float]
+    timestamp: str
+    query: str
+    visualization_data: Optional[Dict] = None
 
+class EnhancedQASystem(QASystem):
+    """
+    Enhanced QA System with integrated prediction context and visualization capabilities.
+    
+    Attributes:
+        prediction_store (Dict): Store for prediction contexts
+        visualization_cache (Dict): Cache for visualization data
+        s3_client: AWS S3 client for cloud storage
+        bucket_name (str): S3 bucket name
+    """
+    
+    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 25):
+        super().__init__(chunk_size, chunk_overlap)
+        self.prediction_store = {}
+        self.visualization_cache = {}
+        self.setup_cloud_storage()
+        self.setup_visualization_handlers()
+        
+    def setup_cloud_storage(self):
+        """Initialize AWS S3 connection with error handling"""
+        try:
+            self.s3_client = boto3.client(
+                's3',
+                aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+                aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+                region_name=os.getenv('AWS_REGION', 'us-east-1')
+            )
+            self.bucket_name = os.getenv('AWS_BUCKET_NAME')
+            logger.info("Successfully initialized cloud storage")
+        except Exception as e:
+            logger.error(f"Failed to initialize cloud storage: {e}")
+            self.s3_client = None
+            
+    def setup_visualization_handlers(self):
+        """Set up visualization type handlers"""
+        self.viz_handlers = {
+            'price_trend': self._create_price_trend_viz,
+            'feature_importance': self._create_feature_importance_viz,
+            'market_comparison': self._create_market_comparison_viz
+        }
+
+    def store_prediction_context(self, 
+                        prediction_result: Dict[str, Any], 
+                        query: str,
+                        features: Dict[str, float]) -> str:
+        """
+        Store prediction context with cloud backup.
+        
+        Args:
+            prediction_result: Dictionary containing prediction outputs
+            query: Original user query
+            features: Feature importance values
+            
+        Returns:
+            str: Context ID for reference
+        """
+        try:
+            # Create context object
+            context = PredictionContext(
+                prediction_data=prediction_result,
+                features=features,
+                timestamp=datetime.now().isoformat(),
+                query=query
+            )
+            
+            # Generate unique ID
+            context_id = hashlib.md5(
+                f"{query}_{context.timestamp}".encode()
+            ).hexdigest()
+            
+            # Store locally
+            self.prediction_store[context_id] = context
+            
+            # Store in cloud if available
+            if self.s3_client:
+                self._store_in_cloud(context_id, context)
+                
+            return context_id
+            
+        except Exception as e:
+            logger.error(f"Error storing prediction context: {e}")
+            return None
+            
+    def _store_in_cloud(self, context_id: str, context: PredictionContext):
+        """Store context in S3 with error handling"""
+        try:
+            context_json = json.dumps({
+                'prediction_data': context.prediction_data,
+                'features': context.features,
+                'timestamp': context.timestamp,
+                'query': context.query
+            })
+            
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=f'prediction_contexts/{context_id}.json',
+                Body=context_json
+            )
+            logger.info(f"Successfully stored context {context_id} in cloud")
+            
+        except ClientError as e:
+            logger.error(f"Failed to store context in cloud: {e}")
+
+    def get_visualization_data(self, 
+                            query: str, 
+                            context_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get visualization data based on query and context.
+        
+        Args:
+            query: User query
+            context_id: Optional context ID for specific prediction
+            
+        Returns:
+            Dict containing visualization data
+        """
+        try:
+            # Determine visualization type needed
+            viz_type = self._determine_visualization_type(query.lower())
+            
+            if not viz_type:
+                return None
+                
+            # Get context data
+            context = None
+            if context_id and context_id in self.prediction_store:
+                context = self.prediction_store[context_id]
+            else:
+                # Get most recent context
+                recent_contexts = sorted(
+                    self.prediction_store.items(),
+                    key=lambda x: x[1].timestamp,
+                    reverse=True
+                )
+                if recent_contexts:
+                    context = recent_contexts[0][1]
+            
+            if not context:
+                return None
+                
+            # Create visualization data
+            viz_handler = self.viz_handlers.get(viz_type)
+            if viz_handler:
+                return viz_handler(context)
+                
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting visualization data: {e}")
+            return None
+
+    def _determine_visualization_type(self, query: str) -> Optional[str]:
+        """Determine appropriate visualization type based on query"""
+        if any(word in query for word in ['trend', 'price', 'value', 'cost']):
+            return 'price_trend'
+        elif any(word in query for word in ['feature', 'factor', 'important']):
+            return 'feature_importance'
+        elif any(word in query for word in ['compare', 'market', 'similar']):
+            return 'market_comparison'
+        return None
+
+    def _create_price_trend_viz(self, context: PredictionContext) -> Dict[str, Any]:
+        """Create price trend visualization data"""
+        try:
+            pred_data = context.prediction_data
+            
+            return {
+                'type': 'price_trend',
+                'data': {
+                    'predicted_price': pred_data['predicted_price'],
+                    'confidence_interval': pred_data['confidence_interval'],
+                    'historical_prices': self._get_historical_prices()
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error creating price trend visualization: {e}")
+            return None
+
+    def _create_feature_importance_viz(self, context: PredictionContext) -> Dict[str, Any]:
+        """Create feature importance visualization data"""
+        try:
+            # Sort features by importance
+            sorted_features = dict(sorted(
+                context.features.items(),
+                key=lambda x: abs(x[1]),
+                reverse=True
+            )[:10])
+            
+            return {
+                'type': 'feature_importance',
+                'data': {
+                    'features': list(sorted_features.keys()),
+                    'importance': list(sorted_features.values())
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error creating feature importance visualization: {e}")
+            return None
+
+    def _create_market_comparison_viz(self, context: PredictionContext) -> Dict[str, Any]:
+        """Create market comparison visualization data"""
+        try:
+            pred_data = context.prediction_data
+            
+            return {
+                'type': 'market_comparison',
+                'data': {
+                    'predicted_price': pred_data['predicted_price'],
+                    'market_average': self._get_market_average(),
+                    'similar_vehicles': self._get_similar_vehicles(
+                        pred_data.get('vehicle_details', {})
+                    )
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error creating market comparison visualization: {e}")
+            return None
+
+    def _get_historical_prices(self) -> Dict[str, float]:
+        """Get historical price data from market analysis"""
+        try:
+            if hasattr(self, 'market_insights'):
+                return self.market_insights.get('historical_prices', {})
+            return {}
+        except Exception:
+            return {}
+
+    def _get_market_average(self) -> float:
+        """Get market average price"""
+        try:
+            if hasattr(self, 'market_insights'):
+                return self.market_insights.get('market_summary', {}).get('median_price', 0)
+            return 0
+        except Exception:
+            return 0
+
+    def _get_similar_vehicles(self, vehicle_details: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Get similar vehicle listings"""
+        try:
+            if hasattr(self, 'market_insights'):
+                similar = self.market_insights.get('similar_vehicles', [])
+                return similar[:5]  # Return top 5 similar vehicles
+            return []
+        except Exception:
+            return []
+
+    def update_chain_with_prediction(self, prediction_id: str):
+        """
+        Update QA chain with new prediction context.
+        
+        Args:
+            prediction_id: ID of prediction context to add
+        """
+        try:
+            if prediction_id not in self.prediction_store:
+                logger.warning(f"Prediction context {prediction_id} not found")
+                return
+                
+            context = self.prediction_store[prediction_id]
+            
+            # Create document from prediction context
+            doc = Document(
+                page_content=json.dumps({
+                    'prediction': context.prediction_data,
+                    'features': context.features,
+                    'query': context.query
+                }, indent=2),
+                metadata={
+                    'source': 'prediction_context',
+                    'id': prediction_id,
+                    'timestamp': context.timestamp
+                }
+            )
+            
+            # Add to vector store
+            if self.vector_db:
+                self.vector_db.add_documents([doc])
+                logger.info(f"Successfully added prediction context {prediction_id} to QA chain")
+            
+        except Exception as e:
+            logger.error(f"Error updating chain with prediction: {e}")
 
         
 def main():
-    """Optimized main execution"""
+    """Main execution with updated system"""
     try:
         sources = [
-            {
-                "path": "Sources\CARPRICEPREDICTIONUSINGMACHINELEARNINGTECHNIQUES.pdf",
-                "type": "pdf"
-            },
-                        {
-                "path": "Sourcesautoconsumer.pdf",
-                "type": "pdf"
-            },
-            {
-                "path": "Sources\car_prices.csv",
-                "type": "csv",
-                "columns": ['year', 'make', 'model', 'trim', 'body', 'transmission', 'vin', 'state','condition', 'odometer', 'color', 'interior', 'seller', 'mmr','sellingprice', 'saledate']
-            }
+            {"path": "Sources/mmv.pdf", "type": "pdf"},
+            {"path": "Sources/autoconsumer.pdf", "type": "pdf"},
+            {"path": "Sources/car_prices.csv", "type": "csv"},
+            {"columns": ['year', 'make', 'model', 'trim', 'body', 'transmission', 
+                        'vin', 'state', 'condition', 'odometer', 'color', 'interior', 
+                        'seller', 'mmr', 'sellingprice', 'saledate']}
         ]
         
-        # Initialize QA system
-        qa_system = OptimizedQASystem(chunk_size=1000, chunk_overlap=50)
+        # Initialize enhanced QA system instead of OptimizedQASystem
+        qa_system = EnhancedQASystem(chunk_size=1000, chunk_overlap=50)
         chain = qa_system.create_chain(sources)
         
         while True:
@@ -1693,11 +2133,19 @@ def main():
                 break
                 
             try:
+                # Get response and visualization if available
                 response = chain.invoke(question)
                 print(f"\nAnswer: {response}")
+                
+                # Get visualization data if applicable
+                viz_data = qa_system.get_visualization_data(question)
+                if viz_data:
+                    print("\nVisualization data available!")
+                    print(json.dumps(viz_data, indent=2))
+                    
                 print("-" * 50)
-                response = chain.invoke(question)
                 qa_system.document_tracer.print_trace(question)
+                
             except Exception as e:
                 logger.error(f"Error processing question: {str(e)}")
 

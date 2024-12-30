@@ -32,11 +32,46 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class CarPriceAnalyst:
+    """
+    Enhanced price analyst with integrated QA capabilities.
+    
+    Attributes:
+        qa_system (QASystem): Reference to QA system
+        predictor (CarPricePredictor): Price prediction model
+        context_store (Dict): Store for prediction contexts
+    """
+    
     def __init__(self):
-        """Initialize with QA system instead of OpenAI"""
         self.qa_system = QASystem(chunk_size=1000, chunk_overlap=50)
-        self.chain = None
-        self.setup_sources()
+        self.predictor = None
+        self.context_store = {}
+        
+    def analyze_and_store(self, prediction_result: Dict[str, Any], query: str):
+        """
+        Analyze prediction results and store context for QA system.
+        
+        Args:
+            prediction_result: Dictionary containing prediction outputs
+            query: Original user query
+        """
+        try:
+            # Store prediction context
+            self.qa_system.update_predictor_context({
+                'prediction': prediction_result,
+                'query': query,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            # Update local context store
+            context_id = hashlib.md5(str(prediction_result).encode()).hexdigest()
+            self.context_store[context_id] = {
+                'data': prediction_result,
+                'query': query,
+                'timestamp': datetime.now()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in analyze_and_store: {e}")
     
     def setup_sources(self):
         """Setup sources for the QA system with proper initialization"""
