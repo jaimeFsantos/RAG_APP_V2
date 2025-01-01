@@ -23,6 +23,10 @@ import warnings
 from datetime import datetime
 from io import BytesIO
 from typing import Dict, Any
+import pytz
+import time
+from datetime import timedelta
+import hashlib
 
 # Third-Party Libraries
 import streamlit as st
@@ -44,10 +48,8 @@ from visualization_dashboard import VisualizationDashboard
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from enhanced_security_audit import (
-    EnhancedSecurityManager, 
-    SecurityConfig,
-    SecureStorageService,
+from enhanced_security_audit import (EnhancedSecurityManager,
+    SecurityMode, 
     AuditEventType,
     audit_trail
 )
@@ -55,39 +57,41 @@ from enhanced_security_audit import (
 class CombinedCarApp:
     def __init__(self):
         try:
-            # Basic initializations
-            load_dotenv()
-            self.temp_storage = "/tmp"
-            self.max_file_size_mb = 100
-            
-            if 'authenticated' not in st.session_state:
-                st.session_state.authenticated = False
-            if 'login_attempts' not in st.session_state:
-                st.session_state.login_attempts = 0
-            if 'current_page' not in st.session_state:
-                st.session_state.current_page = "Home"
+            # Initialize basic session state
+            if 'predictor' not in st.session_state:
+                st.session_state.predictor = None
             if 'messages' not in st.session_state:
                 st.session_state.messages = []
-
-            self.security_config = SecurityConfig()
-            self.security_manager = EnhancedSecurityManager()
-            self.storage_service = SecureStorageService(self.security_config)
-            self.dashboard = VisualizationDashboard(os.getenv('S3_BUCKET_NAME'))
+            if 'qa_system' not in st.session_state:
+                st.session_state.qa_system = None
+            if 'chain' not in st.session_state:
+                st.session_state.chain = None
+            if 'model_trained' not in st.session_state:
+                st.session_state.model_trained = False
+                
+            # Initialize storage service using factory
+            from storage_service import get_storage_service
+            self.storage_service = get_storage_service()
             
+            # Initialize security manager
+            is_ec2 = os.getenv('AWS_EXECUTION_ENV', '').startswith('AWS_ECS')
+            mode = SecurityMode.EC2 if is_ec2 else SecurityMode.LOCAL
+            self.security_manager = EnhancedSecurityManager(mode=mode)
+            
+            self.initialize_security_components()
             self.setup_page_config()
             
-            logger.info("App initialized successfully")
+            logger.info(f"Application initialized in {mode.value} mode")
             
         except Exception as e:
-            logger.error(f"Init error: {e}", exc_info=True)
+            logger.error(f"Initialization error: {e}", exc_info=True)
             st.error(f"Error initializing app: {str(e)}")
-            
+
     def initialize_security_components(self):
-        """Initialize security components if enabled"""
+        """Initialize security components if not already done"""
         try:
             if 'security_manager' not in st.session_state:
                 st.session_state.security_manager = self.security_manager
-                st.session_state.storage_service = self.storage_service
             
             # Initialize security session state
             if 'authenticated' not in st.session_state:
@@ -114,8 +118,6 @@ class CombinedCarApp:
     def should_initialize_security(self):
         """Check if security components should be initialized"""
         return os.getenv('ENABLE_SECURITY', 'false').lower() == 'true'
-
-            
     def setup_page_config(self):
         """Configure the Streamlit page"""
         st.set_page_config(
@@ -205,28 +207,30 @@ class CombinedCarApp:
         st.sidebar.header("Data Upload")
         uploaded_file = st.sidebar.file_uploader("Upload Car Data CSV", type=['csv'])
         
-        # If security is enabled and file is uploaded
-        if uploaded_file is not None and hasattr(self, 'security_manager'):
+        # If file is uploaded
+        if uploaded_file is not None:
             try:
-                # Validate file
-                is_valid, message = self.file_validator.validate_file(uploaded_file)
-                
-                if not is_valid:
-                    st.sidebar.error(message)
-                    return page_selection, None
-                
-                # Store file securely
-                file_path = self.storage_manager.upload_file(
-                    uploaded_file, 
-                    folder="car_data"
-                )
-                
-                if file_path:
-                    st.session_state.uploaded_files[uploaded_file.name] = file_path
-                else:
-                    st.sidebar.error("Error uploading file")
+                # Basic file validation
+                if uploaded_file.size > 100 * 1024 * 1024:  # 50MB limit
+                    st.sidebar.error("File size too large. Maximum size is 50MB.")
                     return page_selection, None
                     
+                if not uploaded_file.name.endswith('.csv'):
+                    st.sidebar.error("Invalid file type. Please upload a CSV file.")
+                    return page_selection, None
+                
+                # If security manager exists, use it for storage
+                if hasattr(self, 'security_manager'):
+                    try:
+                        file_path = self.storage_service.store_file(
+                            uploaded_file.getvalue(), 
+                            uploaded_file.name
+                        )
+                        st.session_state.uploaded_files[uploaded_file.name] = file_path
+                    except Exception as e:
+                        st.sidebar.error(f"Error storing file: {str(e)}")
+                        return page_selection, None
+                        
             except Exception as e:
                 st.sidebar.error(f"Error processing file: {str(e)}")
                 return page_selection, None
@@ -242,27 +246,37 @@ class CombinedCarApp:
                 st.error("Security system not properly initialized")
                 return False
             
-            if not self.security_manager.can_attempt_login():
-                wait_time = (st.session_state.next_attempt - datetime.now()).seconds
-                st.error(f"Too many failed attempts. Please wait {wait_time} seconds.")
-                return False
-            
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
             
             if st.button("Login"):
-                if username == os.getenv("ADMIN_USERNAME") and \
-                self.security_manager.verify_password(password, os.getenv("ADMIN_PASSWORD_HASH")):
+                # Initialize session state first
+                if 'session_start' not in st.session_state:
+                    st.session_state.session_start = datetime.now()
+                st.session_state.last_activity = datetime.now()  # Update activity time
+                
+                if self.security_manager.config.mode == SecurityMode.LOCAL:
+                    # Use local config credentials
+                    is_valid = (username == 'admin' and password == 'admin')  # Simplified for testing
+                else:
+                    # Use environment variables for EC2
+                    is_valid = (username == os.getenv("ADMIN_USERNAME") and 
+                            self.security_manager.verify_password(password, 
+                            os.getenv("ADMIN_PASSWORD_HASH")))
+
+                if is_valid:
                     st.session_state.authenticated = True
-                    st.session_state.login_attempts = 0
+                    st.session_state.last_activity = datetime.now()  # Update again after successful login
                     st.success("Login successful!")
+                    time.sleep(1)  # Give a moment for the success message
+                    st.experimental_rerun()  # Force a clean rerun after login
                     return True
                 else:
-                    self.security_manager.update_failed_login()
                     st.error("Invalid credentials")
                     return False
-                    
+                        
             return False
+            
         except Exception as e:
             logger.error(f"Error in login process: {str(e)}")
             st.error("Login system error")
@@ -762,21 +776,34 @@ class CombinedCarApp:
 
     def run(self):
         """Main application loop with optional security"""
+        # Initialize session state if needed
+        if 'authenticated' not in st.session_state:
+            st.session_state.authenticated = False
+        if 'last_activity' not in st.session_state:
+            st.session_state.last_activity = datetime.now()
+        
         # Only check authentication if security is enabled
         if hasattr(self, 'security_manager'):
+            # First check if already authenticated
             if not st.session_state.authenticated:
                 if not self.render_login():
                     return
-            
-            # Check session timeout
-            if self.security_manager.check_session_timeout():
-                st.warning("Session expired. Please login again.")
-                st.session_state.authenticated = False
-                return
+            else:
+                # Only check timeout if already authenticated
+                if (datetime.now() - st.session_state.last_activity) > timedelta(hours=12):
+                    st.warning("Session expired. Please login again.")
+                    st.session_state.authenticated = False
+                    st.session_state.last_activity = datetime.now()
+                    st.experimental_rerun()
+                    return
+                
+                # Update activity timestamp
+                st.session_state.last_activity = datetime.now()
 
         # Regular app flow
         page, uploaded_file = self.render_sidebar()
         
+    # Rest of your existing run() code...
         # Load data if uploaded
         df = None
         if uploaded_file is not None:

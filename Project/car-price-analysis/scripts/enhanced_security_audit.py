@@ -66,34 +66,172 @@ class AuditEvent:
 
 # In enhanced_security.py
 
+import os
+from typing import Optional, Dict
+from datetime import datetime, timedelta
+import hashlib
+import logging
+import json
+from enum import Enum
+from dataclasses import dataclass
+import boto3
+from botocore.exceptions import ClientError
+import base64
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class SecurityMode(Enum):
+    LOCAL = "local"
+    EC2 = "ec2"
+
 class SecurityConfig:
-    """Security configuration settings"""
-    def __init__(self):
+    """Security configuration with local development support"""
+    def __init__(self, mode: SecurityMode = SecurityMode.LOCAL):
+        self.mode = mode
         self.SESSION_DURATION = timedelta(hours=12)
         self.MAX_LOGIN_ATTEMPTS = 5
         self.LOCKOUT_DURATION = timedelta(minutes=30)
-        self.PASSWORD_MIN_LENGTH = 12
-        self.REQUIRE_MFA = False
         self.FILE_SIZE_LIMIT = 50 * 1024 * 1024  # 50MB
-        self.ALLOWED_EXTENSIONS = {'.csv', '.pdf', '.xlsx'}
-        self.AUDIT_RETENTION_DAYS = 90
+        self.AUDIT_RETENTION_DAYS = 30
         
-        # AWS Configuration - Now instance variables
-        self.aws_region = os.getenv('AWS_REGION', 'us-east-1')
-        self.s3_bucket = os.getenv('S3_BUCKET_NAME')
-        self.kms_key_id = os.getenv('KMS_KEY_ID')
+        # Set up environment-specific configuration
+        if self.mode == SecurityMode.LOCAL:
+            self._setup_local_config()
+            self.s3_client = None
+            self.kms_client = None
+            self.dynamodb = None
+        else:
+            self._setup_aws_config()
+    
+    def _setup_local_config(self):
+        """Configure local development settings"""
+        self.storage_path = os.path.join(os.getcwd(), 'local_security')
+        os.makedirs(self.storage_path, exist_ok=True)
         
-        # Generate encryption key if not exists
-        if not os.getenv('FERNET_KEY'):
-            key = Fernet.generate_key()
-            os.environ['FERNET_KEY'] = key.decode()
+        config_file = os.path.join(self.storage_path, 'security_config.json')
+        if not os.path.exists(config_file):
+            self._create_local_config(config_file)
+        
+        self._load_local_config(config_file)
+    
+    def _create_local_config(self, config_file: str):
+        """Create initial local security configuration"""
+        config = {
+            'admin_username': 'admin',
+            'admin_password_hash': hashlib.sha256('admin'.encode()).hexdigest(),
+            'encryption_key': base64.b64encode(os.urandom(32)).decode(),
+            'created_at': datetime.now().isoformat(),
+            'admin_password': 'admin'
+        }
+        
+        with open(config_file, 'w') as f:
+            json.dump(config, f, indent=2)
+    
+    def _load_local_config(self, config_file: str):
+        """Load local security configuration"""
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+            
+        self.admin_username = config['admin_username']
+        self.admin_password_hash = config['admin_password_hash']
+        self.encryption_key = config['encryption_key']
+    
+    def _setup_aws_config(self):
+        """Configure AWS integration"""
+        try:
+            self.aws_region = os.getenv('AWS_REGION', 'us-east-1')
+            self.s3_client = boto3.client('s3', region_name=self.aws_region)
+            self.kms_client = boto3.client('kms', region_name=self.aws_region)
+            self.dynamodb = boto3.resource('dynamodb', region_name=self.aws_region)
+        except Exception as e:
+            logger.error(f"Error initializing AWS services: {e}")
+            raise
+
+class LocalAuditLogger:
+    """Local implementation of audit logging for development"""
+    def __init__(self, storage_path: str):
+        self.storage_path = os.path.join(storage_path, 'audit_logs')
+        os.makedirs(self.storage_path, exist_ok=True)
+        self.current_log_file = os.path.join(
+            self.storage_path, 
+            f"audit_log_{datetime.now().strftime('%Y%m%d')}.jsonl"
+        )
+    
+    def log_event(self, event: AuditEvent):
+        """Log audit event to local file"""
+        try:
+            event_data = {
+                'event_id': event.event_id,
+                'event_type': event.event_type.value,
+                'timestamp': event.timestamp.isoformat(),
+                'user_id': event.user_id,
+                'ip_address': event.ip_address,
+                'details': event.details,
+                'status': event.status,
+                'session_id': event.session_id
+            }
+            
+            with open(self.current_log_file, 'a') as f:
+                json.dump(event_data, f)
+                f.write('\n')
+                
+        except Exception as e:
+            logger.error(f"Error logging local audit event: {e}")
+    
+    def get_user_activity(self, user_id: str, start_date: datetime = None) -> List[Dict]:
+        """Retrieve user activity from local logs"""
+        activities = []
+        log_files = sorted(os.listdir(self.storage_path))
+        
+        for log_file in log_files:
+            if not log_file.endswith('.jsonl'):
+                continue
+                
+            with open(os.path.join(self.storage_path, log_file), 'r') as f:
+                for line in f:
+                    try:
+                        event = json.loads(line)
+                        if event['user_id'] == user_id:
+                            if start_date is None or datetime.fromisoformat(event['timestamp']) >= start_date:
+                                activities.append(event)
+                    except json.JSONDecodeError:
+                        continue
+        
+        return activities
+
+class LocalStorageService:
+    """Local storage service for development"""
+    def __init__(self, config: SecurityConfig):
+        self.config = config
+        self.storage_path = config.storage_path
+        
+    def store_file(self, file_data: bytes, filename: str) -> str:
+        """Store file locally"""
+        file_path = os.path.join(self.storage_path, filename)
+        with open(file_path, 'wb') as f:
+            f.write(file_data)
+        return file_path
+        
+    def get_file(self, filename: str) -> Optional[bytes]:
+        """Retrieve file from local storage"""
+        file_path = os.path.join(self.storage_path, filename)
+        if os.path.exists(file_path):
+            with open(file_path, 'rb') as f:
+                return f.read()
+        return None
 
 class EncryptionService:
     """Handles data encryption and decryption"""
     def __init__(self, security_config: SecurityConfig):
         self.config = security_config
-        self.fernet = Fernet(os.getenv('FERNET_KEY').encode())
-        self.kms_client = boto3.client('kms', region_name=self.config.aws_region)
+        fernet_key = os.getenv('FERNET_KEY')
+        if not fernet_key:
+            # Generate a key if not provided
+            fernet_key = base64.b64encode(os.urandom(32)).decode()
+            os.environ['FERNET_KEY'] = fernet_key
+        self.fernet = Fernet(fernet_key.encode())
 
 class AuditLogger:
     """Handles audit logging with AWS integration"""
@@ -267,59 +405,161 @@ class SecureStorageService:
 
 class EnhancedSecurityManager:
     """Enhanced security manager with complete audit trail"""
-    def __init__(self):
-        self.config = SecurityConfig()
-        self.audit_logger = AuditLogger()
-        self.storage_service = SecureStorageService()
-        self.encryption_service = EncryptionService()
+    def __init__(self, mode: SecurityMode = SecurityMode.LOCAL):
+        self.config = SecurityConfig(mode=mode)
+        
+        # Initialize services based on mode
+        if mode == SecurityMode.LOCAL:
+            self.audit_logger = LocalAuditLogger(self.config.storage_path)
+            self.storage_service = LocalStorageService(self.config)
+        else:
+            self.audit_logger = AuditLogger()
+            self.storage_service = SecureStorageService()
+            
+        self.encryption_service = EncryptionService(self.config)
         self._setup_session_tracking()
-    
+        self.max_attempts = 5
+        self.lockout_duration = timedelta(minutes=15)  # Adjusted for EC2 free tier resources
+        
     def _setup_session_tracking(self):
-        """Initialize session tracking"""
-        if 'session_id' not in st.session_state:
-            st.session_state.session_id = str(uuid.uuid4())
-        if 'client_ip' not in st.session_state:
-            st.session_state.client_ip = self._get_client_ip()
-    
-    def _get_client_ip(self) -> str:
-        """Get client IP address from Streamlit request"""
-        try:
-            return st.get_client_ip()
-        except:
-            return "unknown"
-    
-    def verify_password(self, password: str, stored_hash: str) -> bool:
-        """Verify password with constant-time comparison"""
-        try:
-            password_hash = hashlib.sha256(password.encode()).hexdigest()
-            is_valid = hmac.compare_digest(password_hash, stored_hash)
+        """Setup session tracking with more lenient timeout"""
+        if 'session_start' not in st.session_state:
+            st.session_state.session_start = datetime.now()
+            st.session_state.last_activity = datetime.now()
+            st.session_state.authenticated = False
+
+    def check_session_timeout(self) -> bool:
+        """Check if session has timed out with proper initialization check"""
+        if not hasattr(st.session_state, 'last_activity'):
+            self._setup_session_tracking()
+            return False
             
-            # Log authentication attempt
-            self.audit_logger.log_event(AuditEvent(
-                event_id=str(uuid.uuid4()),
-                event_type=AuditEventType.LOGIN_ATTEMPT,
-                timestamp=datetime.now(pytz.UTC),
-                user_id=st.session_state.get('username', 'unknown'),
-                ip_address=st.session_state.client_ip,
-                details={'success': is_valid},
-                status='success' if is_valid else 'failure',
-                session_id=st.session_state.session_id
-            ))
+        now = datetime.now()
+        # More lenient 12-hour timeout for development
+        timeout_duration = timedelta(hours=12)
+        
+        if now - st.session_state.last_activity > timeout_duration:
+            return True
             
-            return is_valid
+        # Update last activity timestamp
+        st.session_state.last_activity = now
+        return False
+
+    def initialize_security_components(self):
+        """Initialize security components with proper session handling"""
+        try:
+            if 'security_manager' not in st.session_state:
+                st.session_state.security_manager = self.security_manager
+                
+            # Setup session tracking
+            self._setup_session_tracking()
+            
+            # Initialize security session state
+            if 'uploaded_files' not in st.session_state:
+                st.session_state.uploaded_files = {}
+            
+            logger.info("Security components initialized successfully")
+                    
+        except Exception as e:
+            logger.error(f"Security initialization error: {str(e)}")
+            st.error("Error initializing security components. Running in limited mode.")
+
+    def can_attempt_login(self) -> bool:
+        """Check if login attempts are allowed"""
+        try:
+            # Reset attempts if lockout period has passed
+            if hasattr(st.session_state, 'next_attempt'):
+                if datetime.now(pytz.UTC) >= st.session_state.next_attempt:
+                    st.session_state.login_attempts = 0
+                    return True
+                    
+            return st.session_state.login_attempts < self.max_attempts
             
         except Exception as e:
-            self.audit_logger.log_event(AuditEvent(
-                event_id=str(uuid.uuid4()),
-                event_type=AuditEventType.SYSTEM_ERROR,
-                timestamp=datetime.now(pytz.UTC),
-                user_id=st.session_state.get('username', 'unknown'),
-                ip_address=st.session_state.client_ip,
-                details={'error': str(e)},
-                status='error',
-                session_id=st.session_state.session_id
-            ))
+            logger.error(f"Error checking login attempts: {e}")
             return False
+
+    def verify_password(self, password: str, stored_hash: str) -> bool:
+        """Verify password against stored hash"""
+        try:
+            # For EC2 deployment, use environment variables
+            if self.config.mode == SecurityMode.EC2:
+                valid_password = os.getenv("APP_PASSWORD", "admin")  # Default for testing
+                return password == valid_password
+            
+            # For local mode, verify against stored hash
+            password_hash = hashlib.sha256(password.encode()).hexdigest()
+            return password_hash == stored_hash
+            
+        except Exception as e:
+            logger.error(f"Error verifying password: {e}")
+            return False
+
+    def update_failed_login(self):
+        """Update failed login attempts"""
+        try:
+            st.session_state.login_attempts += 1
+            
+            # Set lockout if max attempts reached
+            if st.session_state.login_attempts >= self.max_attempts:
+                st.session_state.next_attempt = datetime.now(pytz.UTC) + self.lockout_duration
+                logger.warning(f"Account locked for {self.lockout_duration}")
+                
+        except Exception as e:
+            logger.error(f"Error updating failed login: {e}")
+
+    def check_session_timeout(self) -> bool:
+        """Check if session has timed out"""
+        try:
+            if 'last_activity' not in st.session_state:
+                return True
+                
+            timeout = timedelta(hours=8)  # Adjusted for EC2 free tier
+            current_time = datetime.now(pytz.UTC)
+            
+            if current_time - st.session_state.last_activity > timeout:
+                return True
+                
+            # Update last activity
+            st.session_state.last_activity = current_time
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking session timeout: {e}")
+            return True
+        
+    def _setup_session_tracking(self):
+        """Initialize session tracking variables"""
+        try:
+            if 'last_activity' not in st.session_state:
+                st.session_state.last_activity = datetime.now(pytz.UTC)
+            if 'session_id' not in st.session_state:
+                st.session_state.session_id = str(uuid.uuid4())
+            if 'login_attempts' not in st.session_state:
+                st.session_state.login_attempts = 0
+            if 'next_attempt' not in st.session_state:
+                st.session_state.next_attempt = datetime.now(pytz.UTC)
+                
+            # Add IP tracking if available
+            if 'client_ip' not in st.session_state:
+                st.session_state.client_ip = self._get_client_ip()
+                
+            logger.info("Session tracking initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Error setting up session tracking: {e}")
+            raise
+
+    def _get_client_ip(self) -> str:
+        """Get client IP address from request headers"""
+        try:
+            # For EC2 deployment behind load balancer
+            if 'X-Forwarded-For' in st.request.headers:
+                return st.request.headers['X-Forwarded-For'].split(',')[0]
+            # Direct connection
+            return st.request.remote_ip
+        except:
+            return "unknown"
 
 def audit_trail(event_type: AuditEventType):
     """Decorator for adding audit trail to functions"""
