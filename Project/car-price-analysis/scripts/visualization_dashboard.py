@@ -12,6 +12,32 @@ from io import BytesIO
 logger = logging.getLogger(__name__)
 
 class VisualizationDashboard:
+    def _load_data(self, file_path: str) -> pd.DataFrame:
+        """Load data from either local storage or S3"""
+        try:
+            if self.s3_bucket != 'local':
+                # Load from S3
+                response = self.s3_client.get_object(
+                    Bucket=self.s3_bucket, 
+                    Key=file_path
+                )
+                return pd.read_csv(BytesIO(response['Body'].read()))
+            else:
+                # Load from local storage
+                return pd.read_csv(file_path)
+                
+        except Exception as e:
+            logger.error(f"Error loading data: {e}")
+            return pd.DataFrame()
+
+    def render_dashboard(self, file_path: str):
+        """Main dashboard rendering function"""
+        st.header("📊 Car Market Analysis Dashboard")
+        
+        df = self._load_data(file_path)
+        if df.empty:
+            st.error("No data available")
+            return
     def __init__(self, s3_bucket: str):
         self.s3_bucket = s3_bucket
         self.s3_client = boto3.client('s3')
@@ -35,8 +61,8 @@ class VisualizationDashboard:
         """Main dashboard rendering function"""
         st.header("📊 Car Market Analysis Dashboard")
         
-        df = self._load_data_from_s3(data_key)
         if df.empty:
+            df = self._load_data_from_s3(data_key)
             st.error("No data available")
             return
 

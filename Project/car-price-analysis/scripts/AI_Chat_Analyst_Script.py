@@ -502,9 +502,7 @@ class DocumentLoader:
             return "", page.number
         
     def load_pdf(self, file_path: str) -> List[Document]:
-        """
-        Load PDF with enhanced logging for debugging.
-        """
+        """Load PDF with enhanced memory management and error handling"""
         if not os.path.exists(file_path):
             logger.error(f"File not found: {file_path}")
             return []
@@ -518,8 +516,8 @@ class DocumentLoader:
             total_pages = len(doc)
             logger.info(f"Successfully opened PDF with {total_pages} pages")
             
-            # Process pages in smaller batches
-            batch_size = 10
+            # Process pages in smaller batches to manage memory
+            batch_size = 5  # Reduced batch size for EC2 free tier
             for i in range(0, total_pages, batch_size):
                 batch_pages = list(range(i, min(i + batch_size, total_pages)))
                 logger.info(f"Processing batch of pages {i+1} to {min(i + batch_size, total_pages)}")
@@ -528,22 +526,18 @@ class DocumentLoader:
                 for page_num in batch_pages:
                     try:
                         page = doc[page_num]
-                        logger.info(f"Processing page {page_num + 1}/{total_pages}")
-                        
-                        # Text extraction
                         text = page.get_text()
                         
                         if not text.strip():
                             logger.info(f"No text found on page {page_num + 1}, attempting OCR")
                             try:
-                                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                                # Reduced resolution for memory efficiency
+                                pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
                                 img_data = pix.tobytes()
-                                pix = None
+                                pix = None  # Clear pixmap from memory
                                 
                                 if img_data:
                                     text = self.process_image(img_data)
-                                    if text:
-                                        logger.info(f"Successfully extracted text via OCR for page {page_num + 1}")
                             except Exception as e:
                                 logger.warning(f"OCR failed for page {page_num + 1}: {str(e)}")
                                 continue
@@ -559,39 +553,25 @@ class DocumentLoader:
                                     }
                                 )
                             )
-                            logger.info(f"Successfully extracted content from page {page_num + 1}")
-                        else:
-                            logger.warning(f"No content extracted from page {page_num + 1}")
-                        
+                            
                     except Exception as e:
                         logger.warning(f"Error processing page {page_num + 1}: {str(e)}")
                         continue
                     
-                    finally:
-                        gc.collect()
+                    # Clear memory after each page
+                    gc.collect()
                 
-                logger.info(f"Completed processing batch. Documents extracted so far: {len(documents)}")
+                logger.info(f"Completed batch. Documents extracted: {len(documents)}")
                 gc.collect()
-        
-        except fitz.FileDataError as e:
-            logger.error(f"Invalid or corrupted PDF file {file_path}: {str(e)}")
-            return []
-        
+                
         except Exception as e:
             logger.error(f"Error loading PDF {file_path}: {str(e)}")
-            return []
-        
         finally:
             if doc:
-                try:
-                    doc.close()
-                    logger.info(f"Successfully closed PDF file: {file_path}")
-                except Exception:
-                    logger.warning(f"Error closing PDF file: {file_path}")
+                doc.close()
                 doc = None
             gc.collect()
         
-        logger.info(f"Completed processing {file_path}. Total documents extracted: {len(documents)}")
         return documents
 
     def load_csv(
@@ -1541,10 +1521,6 @@ class QASystem(MarketAnalyzer):
             return False
         
     def process_sources(self, sources: List[Dict[str, Union[str, List[str]]]]) -> List[Document]:
-        # Add memory check before processing
-        if not self._check_memory():
-            logger.warning("Memory limit reached, performing cleanup")
-            gc.collect()
         gc.collect()
         all_documents = []
         self.csv_file_path = None
@@ -1554,23 +1530,25 @@ class QASystem(MarketAnalyzer):
             file_type = source["type"].lower()
             
             try:
-                if file_type == "pdf":
-                    documents = self.loader.load_pdf(file_path)
-                    all_documents.extend(documents)
-                elif file_type == "csv":
+                if file_type == "csv":
                     self.csv_file_path = file_path
+                    logger.info(f"Processing CSV file: {file_path}")
+                    
+                    # Read the CSV file
+                    self.data_df = pd.read_csv(file_path)
+                    logger.info(f"Successfully read CSV with shape: {self.data_df.shape}")
+                    
+                    # Create CSV documents
                     text_columns = source.get("columns", None)
                     csv_documents = self.loader.load_csv(file_path, text_columns)
                     all_documents.extend(csv_documents)
                     
-                    # Load and process data for analysis
-                    self.data_df = pd.read_csv(file_path)
-                    
+                    # Generate market insights
                     self.market_insights = self.generate_market_insights(self.data_df)
-                    # Create market analysis documents with error handling
+                    
                     try:
                         market_docs = self._create_market_analysis_documents()
-                        if market_docs:  # Only extend if documents were created
+                        if market_docs:
                             logger.info(f"Created {len(market_docs)} market analysis documents")
                             all_documents.extend(market_docs)
                         else:
@@ -1580,7 +1558,7 @@ class QASystem(MarketAnalyzer):
                     
                     # Process data for price prediction
                     processed_data = self.predictor.prepare_data(self.data_df)
-                    processed_data = processed_data.sample(frac=0.01,random_state=42)
+                    processed_data = processed_data.sample(frac=0.01, random_state=42)
                     features = self.predictor.engineer_features(processed_data)
                     X = features.drop('sellingprice', axis=1)
                     y = features['sellingprice']
@@ -1592,7 +1570,7 @@ class QASystem(MarketAnalyzer):
                     self.predictor.fit(X_train, y_train)
                     metrics, _ = self.predictor.evaluate(X_test, y_test)
                     
-                    # Generate and add predictor context
+                    # Generate predictor context
                     performance_summary = self._generate_performance_summary(metrics)
                     shap_summary = self.analyze_shap_values(X_test)
                     self.predictor_context = f"{performance_summary}\n\nFeature Importance Analysis:\n{shap_summary}"
@@ -1602,10 +1580,11 @@ class QASystem(MarketAnalyzer):
                         metadata={"source": "model_analysis", "type": "predictor_context"}
                     )
                     if predictor_doc:
-                        print("Predictor context document created")
-                    all_documents.append(predictor_doc)      
+                        logger.info("Predictor context document created")
+                    all_documents.append(predictor_doc)
+                    
             except Exception as e:
-                logger.error(f"Error loading {file_path}: {str(e)}")
+                logger.error(f"Error processing {file_path}: {str(e)}")
                 
         return all_documents
     

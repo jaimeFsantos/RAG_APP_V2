@@ -42,7 +42,8 @@ import os
 from dotenv import load_dotenv
 from AI_Chat_Analyst_Script import QASystem
 from Pricing_Func import CarPricePredictor
-from visualization_dashboard import VisualizationDashboard
+from car_viz_dashboard import CarVizDashboard
+from dashboard_config import DashboardConfig
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -80,6 +81,9 @@ class CombinedCarApp:
             
             self.initialize_security_components()
             self.setup_page_config()
+            
+            config = DashboardConfig()
+            self.dashboard = CarVizDashboard(is_cloud=config.is_cloud)
             
             logger.info(f"Application initialized in {mode.value} mode")
             
@@ -154,31 +158,54 @@ class CombinedCarApp:
             }
             </style>
         """, unsafe_allow_html=True)
-
+        
     def initialize_qa_system(self):
-        """Initialize the QA system with provided sources"""
+        """Initialize the QA system with all uploaded files"""
         try:
-            # Define sources with proper paths
-            sources = [
-                {"path": "Project\car-price-analysis\Sources\mmv.pdf", "type": "pdf"},
-                {"path": "Project\car-price-analysis\Sources\autoconsumer.pdf", "type": "pdf"},
-                {"path": "Project\car-price-analysis\Sources\car_prices.csv", "type": "csv",
-                "columns": ['year', 'make', 'model', 'trim', 'body', 'transmission', 
-                            'vin', 'state', 'condition', 'odometer', 'color', 'interior', 
-                            'seller', 'mmr', 'sellingprice', 'saledate']}
-            ]
-
-            # Create new QA system instance
-            qa_system = QASystem(chunk_size=500, chunk_overlap=25)  # Reduced size for memory efficiency
+            logger.info("Starting QA system initialization")
             
-            # Create the chain
+            if not hasattr(st.session_state, 'uploaded_files') or not st.session_state.uploaded_files:
+                logger.error("No uploaded files found in session state")
+                return False
+                
+            # Prepare sources list
+            sources = []
+            
+            # Add CSV file if available
+            csv_files = {k: v for k, v in st.session_state.uploaded_files.items() if k.endswith('.csv')}
+            if csv_files:
+                most_recent_csv = max(csv_files.items(), key=lambda x: x[1])[1]
+                sources.append({
+                    "path": most_recent_csv,
+                    "type": "csv",
+                    "columns": ['year', 'make', 'model', 'trim', 'body', 'transmission', 
+                            'vin', 'state', 'condition', 'odometer', 'color', 'interior', 
+                            'seller', 'mmr', 'sellingprice', 'saledate']
+                })
+                logger.info(f"Added CSV source: {most_recent_csv}")
+            
+            # Add PDF files if available
+            pdf_files = {k: v for k, v in st.session_state.uploaded_files.items() if k.endswith('.pdf')}
+            for pdf_name, pdf_path in pdf_files.items():
+                sources.append({
+                    "path": pdf_path,
+                    "type": "pdf"
+                })
+                logger.info(f"Added PDF source: {pdf_path}")
+            
+            if not sources:
+                logger.error("No valid source files found")
+                return False
+                
+            # Initialize QA system with all sources
+            logger.info(f"Initializing QA system with {len(sources)} sources")
+            qa_system = QASystem(chunk_size=500, chunk_overlap=25)
             chain = qa_system.create_chain(sources)
             
             if chain is None:
                 logger.error("Failed to create QA chain")
                 return False
                 
-            # Only update session state if chain creation was successful
             st.session_state.qa_system = qa_system
             st.session_state.chain = chain
             logger.info("QA System initialized successfully")
@@ -187,7 +214,7 @@ class CombinedCarApp:
         except Exception as e:
             logger.error(f"Error initializing QA System: {e}")
             return False
-
+    
     def render_sidebar(self):
         """Render the sidebar with navigation and file upload"""
         st.sidebar.title("Navigation")
@@ -205,37 +232,48 @@ class CombinedCarApp:
         )
         
         st.sidebar.header("Data Upload")
-        uploaded_file = st.sidebar.file_uploader("Upload Car Data CSV", type=['csv'])
         
-        # If file is uploaded
-        if uploaded_file is not None:
-            try:
-                # Basic file validation
-                if uploaded_file.size > 100 * 1024 * 1024:  # 50MB limit
-                    st.sidebar.error("File size too large. Maximum size is 50MB.")
-                    return page_selection, None
-                    
-                if not uploaded_file.name.endswith('.csv'):
-                    st.sidebar.error("Invalid file type. Please upload a CSV file.")
-                    return page_selection, None
-                
-                # If security manager exists, use it for storage
-                if hasattr(self, 'security_manager'):
-                    try:
-                        file_path = self.storage_service.store_file(
-                            uploaded_file.getvalue(), 
-                            uploaded_file.name
-                        )
-                        st.session_state.uploaded_files[uploaded_file.name] = file_path
-                    except Exception as e:
-                        st.sidebar.error(f"Error storing file: {str(e)}")
-                        return page_selection, None
+        # Create separate uploaders for CSV and PDF
+        csv_file = st.sidebar.file_uploader("Upload Car Data (CSV)", type=['csv'], key='csv_uploader')
+        pdf_files = st.sidebar.file_uploader("Upload Documentation (PDF)", 
+                                        type=['pdf'], 
+                                        accept_multiple_files=True,
+                                        key='pdf_uploader')
+        
+        uploaded_files = []
+        
+        try:
+            if csv_file is not None:
+                if csv_file.size > 100 * 1024 * 1024:  # 100MB limit
+                    st.sidebar.error("CSV file size too large. Maximum size is 100MB.")
+                else:
+                    file_path = self.storage_service.store_file(csv_file.getvalue(), csv_file.name)
+                    st.session_state.uploaded_files[csv_file.name] = file_path
+                    uploaded_files.append({"path": file_path, "type": "csv"})
+                    logger.info(f"Stored CSV file: {file_path}")
+            
+            if pdf_files:
+                for pdf_file in pdf_files:
+                    if pdf_file.size > 50 * 1024 * 1024:  # 50MB limit per PDF
+                        st.sidebar.error(f"PDF file {pdf_file.name} too large. Maximum size is 50MB.")
+                        continue
                         
-            except Exception as e:
-                st.sidebar.error(f"Error processing file: {str(e)}")
-                return page_selection, None
-        
-        return page_selection, uploaded_file
+                    file_path = self.storage_service.store_file(pdf_file.getvalue(), pdf_file.name)
+                    st.session_state.uploaded_files[pdf_file.name] = file_path
+                    uploaded_files.append({"path": file_path, "type": "pdf"})
+                    logger.info(f"Stored PDF file: {file_path}")
+            
+            # Show currently loaded files
+            if st.session_state.uploaded_files:
+                st.sidebar.subheader("Loaded Files")
+                for filename, path in st.session_state.uploaded_files.items():
+                    st.sidebar.text(f"✓ {filename}")
+                    
+        except Exception as e:
+            logger.error(f"Error processing uploaded files: {e}")
+            st.sidebar.error("Error processing uploaded files")
+            
+        return page_selection, uploaded_files
     
     def render_login(self):
         """Render login interface"""
@@ -719,18 +757,51 @@ class CombinedCarApp:
         
         container.plotly_chart(fig, use_container_width=True)
         
+# In Main_App.py, modify the render_data_analysis method:
+
     def render_data_analysis(self, df):
+        """Render data analysis dashboard with error handling and cloud storage"""
+        st.header("📊 Data Analysis Dashboard")
+        
         if df is None:
-            st.warning("Please upload data to view analytics.")
+            st.warning("Please upload data using the sidebar to view analytics.")
             return
             
-        # Upload data to S3 if needed
-        data_key = f"temp/car_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         try:
-            self.storage_service.upload_file(df.to_csv(index=False), data_key)
-            self.dashboard.render_dashboard(data_key)
+            # Show loading state while preparing data
+            with st.spinner("Processing data for visualization..."):
+                # Generate cloud storage path
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                storage_path = f"analytics/car_data_{timestamp}.csv"
+                
+                # Upload data to storage
+                try:
+                    # Convert DataFrame to CSV string
+                    csv_buffer = BytesIO()
+                    df.to_csv(csv_buffer, index=False)
+                    csv_data = csv_buffer.getvalue()
+                    
+                    # Upload to storage service
+                    file_path = self.storage_service.store_file(csv_data, storage_path)
+                    
+                    # Display basic stats while dashboard loads
+                    st.write("Dataset Overview:")
+                    cols = st.columns(3)
+                    cols[0].metric("Total Records", f"{len(df):,}")
+                    cols[1].metric("Average Price", f"${df['sellingprice'].mean():,.2f}")
+                    cols[2].metric("Unique Models", f"{df['model'].nunique():,}")
+                    
+                    # Render dashboard with cloud path
+                    self.dashboard.render_dashboard(file_path)
+                    
+                except Exception as e:
+                    logger.error(f"Storage error: {str(e)}")
+                    st.error("Error storing visualization data")
+                    return
+                    
         except Exception as e:
-            st.error(f"Error rendering dashboard: {str(e)}")
+            logger.error(f"Dashboard error: {str(e)}")
+            st.error("Error rendering dashboard")
 
     def _render_market_analysis(self, data, container):
         """Render market analysis visualization"""
@@ -801,15 +872,18 @@ class CombinedCarApp:
                 st.session_state.last_activity = datetime.now()
 
         # Regular app flow
-        page, uploaded_file = self.render_sidebar()
+        page, uploaded_files = self.render_sidebar()
         
     # Rest of your existing run() code...
         # Load data if uploaded
         df = None
-        if uploaded_file is not None:
+        if uploaded_files:
             try:
-                df = pd.read_csv(uploaded_file)
-                logger.info(f"Successfully loaded data with shape: {df.shape}")
+                # Find the CSV file in uploaded files
+                csv_file = next((f for f in uploaded_files if f["type"] == "csv"), None)
+                if csv_file:
+                    df = pd.read_csv(csv_file["path"])
+                    logger.info(f"Successfully loaded data with shape: {df.shape}")
             except Exception as e:
                 st.error(f"Error loading data: {str(e)}")
                 return
