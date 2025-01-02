@@ -16,8 +16,6 @@ Components:
 """
 
 # Standard Library Imports
-import json
-import base64
 import logging
 import warnings
 from datetime import datetime
@@ -26,7 +24,7 @@ from typing import Dict, Any
 import pytz
 import time
 from datetime import timedelta
-import hashlib
+from sklearn.model_selection import train_test_split
 
 # Third-Party Libraries
 import streamlit as st
@@ -40,7 +38,7 @@ warnings.filterwarnings('ignore')
 
 import os
 from dotenv import load_dotenv
-from AI_Chat_Analyst_Script import QASystem
+from AI_Chat_Analyst_Script import EnhancedQASystem
 from Pricing_Func import CarPricePredictor
 from car_viz_dashboard import CarVizDashboard
 from dashboard_config import DashboardConfig
@@ -199,7 +197,7 @@ class CombinedCarApp:
                 
             # Initialize QA system with all sources
             logger.info(f"Initializing QA system with {len(sources)} sources")
-            qa_system = QASystem(chunk_size=500, chunk_overlap=25)
+            qa_system = EnhancedQASystem(chunk_size=500, chunk_overlap=25)
             chain = qa_system.create_chain(sources)
             
             if chain is None:
@@ -349,238 +347,277 @@ class CombinedCarApp:
 
     @audit_trail(AuditEventType.MODEL_TRAINING)
     def render_price_predictor(self, df: pd.DataFrame):
-        """Render the price predictor interface from Pricing_Func"""
-        st.header("💰 Car Price Predictor")
+        """
+        Render the price predictor interface with integrated chat analysis
         
-        if df is None:
-            st.warning("Please upload data to use the price predictor.")
-            return
-            
-                    # Initialize predictor if needed
-        if st.session_state.predictor is None:
-            st.session_state.predictor = CarPricePredictor(
-                models=['rf', 'gbm'],
-                fast_mode=st.sidebar.checkbox("Fast Mode", value=True)
-            )
-            
+        Args:
+            df (pd.DataFrame): Input data for price prediction
+        """
         try:
-            # Verify required columns exist
-            required_columns = ['make', 'model', 'trim', 'body', 'transmission', 
-                            'state', 'condition', 'odometer', 'color', 'interior', 
-                            'sellingprice']
+            st.header("💰 Car Price Predictor")
+            
+            if df is None:
+                st.warning("Please upload data to use the price predictor.")
+                return
+                
+            # Initialize predictor if needed
+            if st.session_state.predictor is None:
+                st.session_state.predictor = CarPricePredictor(
+                    models=['rf', 'gbm'],
+                    fast_mode=st.sidebar.checkbox("Fast Mode", value=True)
+                )
+            
+            # Verify required columns
+            required_columns = [
+                'make', 'model', 'trim', 'body', 'transmission', 
+                'state', 'condition', 'odometer', 'color', 'interior', 'sellingprice'
+            ]
             missing_columns = [col for col in required_columns if col not in df.columns]
             if missing_columns:
                 st.error(f"Missing required columns: {', '.join(missing_columns)}")
                 return
             
-            # Fill NA values for categorical columns
-            categorical_columns = ['make', 'model', 'trim', 'body', 'transmission', 
-                                'state', 'color', 'interior', 'seller']
-            for col in categorical_columns:
-                if col in df.columns:
-                    df[col] = df[col].fillna('unknown')
-            
-            # Fill NA values for numeric columns with median
-            numeric_columns = ['year', 'condition', 'odometer', 'sellingprice']
-            for col in numeric_columns:
-                if col in df.columns:
-                    df[col] = df[col].fillna(df[col].median())
-            
-            # Update unique values for the predictor
-            st.session_state.predictor.update_unique_values(df)
-            
+            # Data preparation
+            try:
+                # Fill missing values
+                df = self._prepare_predictor_data(df)
+                
+                # Update unique values
+                st.session_state.predictor.update_unique_values(df)
+            except Exception as e:
+                logger.error(f"Error preparing data: {e}")
+                st.error("Error preparing data for prediction")
+                return
+
             # Vehicle selection interface
             st.subheader("Select Vehicle")
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                make = st.selectbox("Make", options=sorted(df['make'].unique()))
-            
-            filtered_models = df[df['make'] == make]['model'].unique()
-            with col2:
-                model = st.selectbox("Model", options=sorted(filtered_models))
-            
-            filtered_trims = df[
-                (df['make'] == make) & 
-                (df['model'] == model)
-            ]['trim'].unique()
-            with col3:
-                trim = st.selectbox("Trim", options=sorted(filtered_trims))
-            
-            # Filter data for selected vehicle and ensure it's a DataFrame
-            filter_condition = (
-                (df['make'].fillna('').eq(make)) &
-                (df['model'].fillna('').eq(model)) &
-                (df['trim'].fillna('').eq(trim))
-            )
-            
-            filtered_data = pd.DataFrame(df[filter_condition])
-            
-            if len(filtered_data) == 0:
-                st.warning("No data available for the selected vehicle combination.")
-                return
+            try:
+                make, model, trim = self._render_vehicle_selector(df)
+                filtered_data = self._get_filtered_data(df, make, model, trim)
                 
-            st.info(f"Number of samples for this vehicle: {len(filtered_data)}")
+                if len(filtered_data) == 0:
+                    st.warning("No data available for the selected vehicle combination.")
+                    return
+                    
+                st.info(f"Number of samples for this vehicle: {len(filtered_data)}")
+            except Exception as e:
+                logger.error(f"Error in vehicle selection: {e}")
+                st.error("Error selecting vehicle")
+                return
+
             # Model training section
-            if len(filtered_data) > 5:  # Minimum samples needed for training
+            if len(filtered_data) > 5:  # Minimum samples needed
                 if st.button("Train Models", type="primary"):
-                    with st.spinner("Training models... This may take a few minutes."):
-                        try:
-                            # Convert filtered_data to DataFrame if it's not already
-                            filtered_data = pd.DataFrame(filtered_data)
-                            
-                            # Prepare and engineer features
-                            df_processed = st.session_state.predictor.prepare_data(filtered_data)
-                            
-                            # Ensure df_processed is a DataFrame
-                            if not isinstance(df_processed, pd.DataFrame):
-                                df_processed = pd.DataFrame(df_processed)
-                                
-                            # Engineer features
-                            df_engineered = st.session_state.predictor.engineer_features(df_processed)
-                            
-                            # Ensure proper column handling for feature selection
-                            drop_cols = ['sellingprice']
-                            if 'mmr' in df_engineered.columns:
-                                drop_cols.append('mmr')
-                            
-                            # Split features and target
-                            X = df_engineered.drop(columns=[col for col in drop_cols if col in df_engineered.columns])
-                            y = df_engineered['sellingprice']
-                            
-                            # Remove multicollinearity
-                            X = st.session_state.predictor.remove_multicollinearity(X)
-                            
-                            # Train-test split
-                            from sklearn.model_selection import train_test_split
-                            X_train, X_test, y_train, y_test = train_test_split(
-                                X, y, test_size=0.2, random_state=42
-                            )
-                            
-                            # Fit and evaluate models
-                            st.session_state.predictor.fit(X_train, y_train)
-                            metrics, predictions = st.session_state.predictor.evaluate(X_test, y_test)
-                            
-                            # Store in session state
-                            st.session_state.metrics = metrics
-                            st.session_state.model_trained = True
-                            
-                            st.success("Models trained successfully!")
-                            
-                        except Exception as e:
-                            st.error(f"Error during training: {str(e)}")
+                    self._train_predictor_models(filtered_data)
             else:
                 st.warning("Not enough samples to train models. Please select a different vehicle with more data.")
-            
-            # Display model performance metrics if trained
+
+            # Display model performance metrics
             if st.session_state.model_trained and 'metrics' in st.session_state:
-                st.subheader("Model Performance")
-                
-                avg_metrics = {
-                    'RMSE': np.mean([m['rmse'] for m in st.session_state.metrics.values()]),
-                    'R²': np.mean([m['r2'] for m in st.session_state.metrics.values()]),
-                    'Error %': np.mean([m['mape'] for m in st.session_state.metrics.values()]) * 100
-                }
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Average Error", f"{avg_metrics['Error %']:.1f}%")
-                with col2:
-                    st.metric("RMSE", f"${avg_metrics['RMSE']:,.0f}")
-                with col3:
-                    st.metric("R² Score", f"{avg_metrics['R²']:.3f}")
-            
+                self._display_model_metrics()
+
             # Price estimator section
             if st.session_state.model_trained:
                 st.subheader("Price Estimator")
+                price_estimate = self._render_price_estimator()
                 
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    year = st.number_input("Year", min_value=1900, max_value=2024, value=2020)
-                    condition = st.number_input("Condition (1-50)", min_value=1.0, max_value=50.0, value=25.0, step=1.0)
-                    odometer = st.number_input("Mileage", min_value=0, value=50000, step=1000)
-                    state = st.selectbox("State", options=st.session_state.predictor.unique_values['state'])
-                
-                with col2:
-                    body = st.selectbox("Body Style", options=st.session_state.predictor.unique_values['body'])
-                    transmission = st.selectbox("Transmission", options=st.session_state.predictor.unique_values['transmission'])
-                    color = st.selectbox("Color", options=st.session_state.predictor.unique_values['color'])
-                    interior = st.selectbox("Interior", options=st.session_state.predictor.unique_values['interior'])
-                
-                if st.button("Get Price Estimate", type="primary"):
-                    with st.spinner("Calculating price estimate..."):
-                        try:
-                            input_data = {
-                                'state': state,
-                                'body': body,
-                                'transmission': transmission,
-                                'color': color,
-                                'interior': interior,
-                                'year': year,
-                                'condition': condition,
-                                'odometer': odometer
-                            }
-                            
-                            prediction_result = st.session_state.predictor.create_what_if_prediction(input_data)
-                            
-                            mean_price = prediction_result['predicted_price']
-                            low_estimate, high_estimate = prediction_result['prediction_interval']
-                            
-                            st.subheader("Price Estimates")
-                            col1, col2, col3 = st.columns(3)
-                            
-                            with col1:
-                                st.metric("Low Estimate", f"${low_estimate:,.0f}")
-                            with col2:
-                                st.metric("Best Estimate", f"${mean_price:,.0f}")
-                            with col3:
-                                st.metric("High Estimate", f"${high_estimate:,.0f}")
-                            
-                            st.info(f"Estimated error margin: ±{prediction_result['mape']*100:.1f}%")
-                            
-                        except Exception as e:
-                            st.error(f"Error during prediction: {str(e)}")
-                                        
-                if st.session_state.model_trained:
-                    st.subheader("💡 AI Insights")
+                # Display prediction if made
+                if price_estimate:
+                    self._display_prediction_results(price_estimate)
                     
-                    # Initialize AI chat if needed
-                    if 'qa_system' not in st.session_state:
-                        st.session_state.qa_system = QASystem()
-                        
-                    # Add predictor outputs to context
-                    if 'last_prediction_result' in st.session_state:
-                        st.session_state.qa_system.process_predictor_outputs(
-                            st.session_state.last_prediction_result
-                        )
+                    # AI Chat Integration
+                    st.markdown("---")
+                    self._render_predictor_chat(price_estimate)
                     
-                    # Chat interface
-                    query = st.text_input(
-                        "Ask about this prediction or market insights:",
-                        placeholder="E.g., What factors influenced this price prediction?"
-                    )
-                    
-                    if query:
-                        with st.spinner("Analyzing..."):
-                            try:
-                                # Get response with visualization
-                                response = st.session_state.qa_system.generate_response(query)
-                                
-                                # Display text response
-                                st.markdown("### Analysis")
-                                st.markdown(response['text_response'])
-                                
-                                # Display visualization if available
-                                if response.get('visualization'):
-                                    st.markdown("### Visualization")
-                                    fig = json.loads(response['visualization']['plot'])
-                                    st.plotly_chart(go.Figure(fig), use_container_width=True)
-                            except Exception as e:
-                                st.error(f"Error generating insights: {str(e)}")   
         except Exception as e:
-            st.error(f"Error generating insights: {str(e)}")                # After price estimation section, add AI chat integration
+            logger.error(f"Error in price predictor: {e}")
+            st.error("An error occurred. Please try again.")
 
+    def _prepare_predictor_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Prepare data for prediction with proper error handling"""
+        categorical_columns = [
+            'make', 'model', 'trim', 'body', 'transmission', 
+            'state', 'color', 'interior', 'seller'
+        ]
+        for col in categorical_columns:
+            if col in df.columns:
+                df[col] = df[col].fillna('unknown')
+
+        numeric_columns = ['year', 'condition', 'odometer', 'sellingprice']
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = df[col].fillna(df[col].median())
+        
+        return df
+
+    def _render_vehicle_selector(self, df: pd.DataFrame):
+        """Render vehicle selection interface"""
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            make = st.selectbox("Make", options=sorted(df['make'].unique()))
+        
+        filtered_models = df[df['make'] == make]['model'].unique()
+        with col2:
+            model = st.selectbox("Model", options=sorted(filtered_models))
+        
+        filtered_trims = df[
+            (df['make'] == make) & 
+            (df['model'] == model)
+        ]['trim'].unique()
+        with col3:
+            trim = st.selectbox("Trim", options=sorted(filtered_trims))
+            
+        return make, model, trim
+
+    def _get_filtered_data(self, df: pd.DataFrame, make: str, model: str, trim: str) -> pd.DataFrame:
+        """Get filtered data for selected vehicle"""
+        filter_condition = (
+            (df['make'].fillna('').eq(make)) &
+            (df['model'].fillna('').eq(model)) &
+            (df['trim'].fillna('').eq(trim))
+        )
+        return pd.DataFrame(df[filter_condition])
+
+    def _train_predictor_models(self, filtered_data: pd.DataFrame):
+        """Train prediction models with proper error handling"""
+        with st.spinner("Training models... This may take a few minutes."):
+            try:
+                # Prepare and engineer features
+                df_processed = st.session_state.predictor.prepare_data(filtered_data)
+                df_engineered = st.session_state.predictor.engineer_features(df_processed)
+                
+                # Split features and target
+                drop_cols = ['sellingprice']
+                if 'mmr' in df_engineered.columns:
+                    drop_cols.append('mmr')
+                
+                X = df_engineered.drop(columns=[col for col in drop_cols if col in df_engineered.columns])
+                y = df_engineered['sellingprice']
+                
+                # Remove multicollinearity
+                X = st.session_state.predictor.remove_multicollinearity(X)
+                
+                # Train test split
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X, y, test_size=0.2, random_state=42
+                )
+                
+                # Fit and evaluate models
+                st.session_state.predictor.fit(X_train, y_train)
+                metrics, predictions = st.session_state.predictor.evaluate(X_test, y_test)
+                
+                st.session_state.metrics = metrics
+                st.session_state.model_trained = True
+                
+                st.success("Models trained successfully!")
+                
+            except Exception as e:
+                logger.error(f"Error during training: {e}")
+                st.error(f"Error during model training: {str(e)}")
+
+    def _display_model_metrics(self):
+        """Display model performance metrics"""
+        st.subheader("Model Performance")
+        
+        avg_metrics = {
+            'RMSE': np.mean([m['rmse'] for m in st.session_state.metrics.values()]),
+            'R²': np.mean([m['r2'] for m in st.session_state.metrics.values()]),
+            'Error %': np.mean([m['mape'] for m in st.session_state.metrics.values()]) * 100
+        }
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Average Error", f"{avg_metrics['Error %']:.1f}%")
+        with col2:
+            st.metric("RMSE", f"${avg_metrics['RMSE']:,.0f}")
+        with col3:
+            st.metric("R² Score", f"{avg_metrics['R²']:.3f}")
+
+    def _render_price_estimator(self):
+        """Render price estimation interface"""
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            year = st.number_input("Year", min_value=1900, max_value=2024, value=2020)
+            condition = st.number_input("Condition (1-50)", min_value=1.0, max_value=50.0, value=25.0, step=1.0)
+            odometer = st.number_input("Mileage", min_value=0, value=50000, step=1000)
+            state = st.selectbox("State", options=st.session_state.predictor.unique_values['state'])
+        
+        with col2:
+            body = st.selectbox("Body Style", options=st.session_state.predictor.unique_values['body'])
+            transmission = st.selectbox("Transmission", options=st.session_state.predictor.unique_values['transmission'])
+            color = st.selectbox("Color", options=st.session_state.predictor.unique_values['color'])
+            interior = st.selectbox("Interior", options=st.session_state.predictor.unique_values['interior'])
+        
+        if st.button("Get Price Estimate", type="primary"):
+            return self._generate_price_estimate(
+                year, condition, odometer, state, 
+                body, transmission, color, interior
+            )
+        return None
+
+    def _generate_price_estimate(self, year, condition, odometer, state, 
+                            body, transmission, color, interior):
+        """Generate price estimate with error handling"""
+        try:
+            input_data = {
+                'state': state,
+                'body': body,
+                'transmission': transmission,
+                'color': color,
+                'interior': interior,
+                'year': year,
+                'condition': condition,
+                'odometer': odometer
+            }
+            
+            return st.session_state.predictor.create_what_if_prediction(input_data)
+            
+        except Exception as e:
+            logger.error(f"Error generating prediction: {e}")
+            st.error("Error generating price estimate")
+            return None
+
+    def _display_prediction_results(self, prediction_result: dict):
+        """Display prediction results"""
+        mean_price = prediction_result['predicted_price']
+        low_estimate, high_estimate = prediction_result['prediction_interval']
+        
+        st.subheader("Price Estimates")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Low Estimate", f"${low_estimate:,.0f}")
+        with col2:
+            st.metric("Best Estimate", f"${mean_price:,.0f}")
+        with col3:
+            st.metric("High Estimate", f"${high_estimate:,.0f}")
+        
+        st.info(f"Estimated error margin: ±{prediction_result['mape']*100:.1f}%")
+        
+        # Store prediction result for chat context
+        st.session_state.last_prediction_result = prediction_result
+
+    def _render_predictor_chat(self, prediction_result: dict):
+        """Render chat interface for prediction analysis"""
+        st.subheader("💭 AI Analysis")
+        
+        # Initialize QA system if needed
+        if not hasattr(st.session_state, 'qa_system') or st.session_state.qa_system is None:
+            self._initialize_qa_system()
+        
+        # Create chat interface
+        if st.session_state.qa_system and hasattr(st.session_state.qa_system, 'chain'):
+            chat_col, context_col = st.columns([2, 1])
+            
+            with chat_col:
+                self._render_chat_messages()
+                
+            with context_col:
+                self._render_prediction_context(prediction_result)
+                            
+                            
     @audit_trail(AuditEventType.CHAT_INTERACTION)
     def render_chat_assistant(self):
         """Render the AI chat assistant interface with visualizations"""
@@ -617,24 +654,25 @@ class CombinedCarApp:
                     with st.spinner("Thinking..."):
                         try:
                             # Get response and determine visualization type
-                            response = st.session_state.chain.invoke(prompt)
-                            if response is None:
-                                st.error("Unable to generate response. Please try again.")
-                                return
+                            response = st.session_state.qa_system.generate_response(prompt)
                             
                             # Analyze query to determine visualization type
                             viz_type = self._determine_visualization_type(prompt.lower())
                             
-                            # Generate response
-                            st.markdown(response)
+                            # Display text response
+                            st.markdown(response['text'])
                             st.session_state.messages.append({
                                 "role": "assistant", 
-                                "content": response
+                                "content": response['text']
                             })
-                            
-                            # Update visualization if needed
-                            if viz_type:
-                                self._update_visualization(viz_type, viz_col)
+                        
+                            # Display visualization if available
+                            if response['visualization']:
+                                with viz_col:
+                                    st.plotly_chart(
+                                        response['visualization'],
+                                        use_container_width=True
+                                    )
                                 
                         except Exception as e:
                             logger.error(f"Error generating response: {str(e)}")
@@ -642,7 +680,44 @@ class CombinedCarApp:
 
         # Initialize visualization column
         with viz_col:
-            st.empty()  # Placeholder for visualizations
+            st.empty()  # Placeholder for visualizations that will be updated
+            
+            
+    def _render_chat_messages(self):
+        """Render chat message history and input"""
+        # Display existing messages
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        # Chat input
+        if prompt := st.chat_input("Ask about this prediction or market insights..."):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant"):
+                try:
+                    response = st.session_state.qa_system.chain.invoke(prompt)
+                    st.markdown(response)
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": response
+                    })
+                except Exception as e:
+                    logger.error(f"Error generating response: {str(e)}")
+                    st.error("Failed to generate response. Please try again.")
+
+    def _render_prediction_context(self, prediction_result: dict):
+        """Display prediction context in sidebar"""
+        st.info("Current Prediction Context")
+        st.write(f"Predicted Price: ${prediction_result['predicted_price']:,.2f}")
+        st.write(f"Confidence: ±{prediction_result['mape']*100:.1f}%")
+        
+        if 'model_predictions' in prediction_result:
+            st.write("Model Predictions:")
+            for model, price in prediction_result['model_predictions'].items():
+                st.write(f"- {model}: ${price:,.2f}")
 
     def _determine_visualization_type(self, query: str) -> str:
         """Determine the type of visualization needed based on the query"""
@@ -760,7 +835,7 @@ class CombinedCarApp:
 # In Main_App.py, modify the render_data_analysis method:
 
     def render_data_analysis(self, df):
-        """Render data analysis dashboard with error handling and cloud storage"""
+        """Render data analysis dashboard with integrated chat analysis"""
         st.header("📊 Data Analysis Dashboard")
         
         if df is None:
@@ -784,15 +859,66 @@ class CombinedCarApp:
                     # Upload to storage service
                     file_path = self.storage_service.store_file(csv_data, storage_path)
                     
-                    # Display basic stats while dashboard loads
-                    st.write("Dataset Overview:")
-                    cols = st.columns(3)
-                    cols[0].metric("Total Records", f"{len(df):,}")
-                    cols[1].metric("Average Price", f"${df['sellingprice'].mean():,.2f}")
-                    cols[2].metric("Unique Models", f"{df['model'].nunique():,}")
+                    # Create tabs for Dashboard and Chat
+                    dash_tab, chat_tab = st.tabs(["📈 Dashboard", "💬 AI Analysis"])
                     
-                    # Render dashboard with cloud path
-                    self.dashboard.render_dashboard(file_path)
+                    with dash_tab:
+                        # Display basic stats
+                        st.write("Dataset Overview:")
+                        cols = st.columns(3)
+                        cols[0].metric("Total Records", f"{len(df):,}")
+                        cols[1].metric("Average Price", f"${df['sellingprice'].mean():,.2f}")
+                        cols[2].metric("Unique Models", f"{df['model'].nunique():,}")
+                        
+                        # Render dashboard with cloud path
+                        self.dashboard.render_dashboard(file_path)
+                    
+                    with chat_tab:
+                        # Initialize QA system if needed
+                        if not hasattr(st.session_state, 'qa_system') or st.session_state.qa_system is None:
+                            self._initialize_qa_system()
+                        
+                        # Convert saledate to datetime and handle numeric data safely
+                        try:
+                            df['saledate'] = pd.to_datetime(df['saledate'])
+                            date_range = f"{df['saledate'].min().strftime('%Y-%m-%d')} to {df['saledate'].max().strftime('%Y-%m-%d')}"
+                        except Exception as e:
+                            logger.warning(f"Error processing dates: {e}")
+                            date_range = "Date range unavailable"
+                        
+                        # Safely get numeric values
+                        try:
+                            price_min = df['sellingprice'].min()
+                            price_max = df['sellingprice'].max()
+                            price_range = f"${price_min:,.2f} to ${price_max:,.2f}"
+                        except Exception as e:
+                            logger.warning(f"Error processing prices: {e}")
+                            price_range = "Price range unavailable"
+                        
+                        # Add dashboard metrics to QA context
+                        dashboard_context = {
+                            'total_records': len(df),
+                            'avg_price': float(df['sellingprice'].mean()),
+                            'unique_models': int(df['model'].nunique()),
+                            'date_range': date_range,
+                            'price_range': price_range
+                        }
+                        
+                        # Create chat columns
+                        chat_col, viz_col = st.columns([2, 1])
+                        
+                        with chat_col:
+                            self._render_chat_messages()
+                            
+                        with viz_col:
+                            # Display dashboard context
+                            st.info("Dashboard Insights")
+                            st.write("Dataset Summary:")
+                            st.write(f"• Records: {dashboard_context['total_records']:,}")
+                            st.write(f"• Average Price: ${dashboard_context['avg_price']:,.2f}")
+                            st.write(f"• Models: {dashboard_context['unique_models']:,}")
+                            st.write(f"• Date Range: {dashboard_context['date_range']}")
+                            st.write(f"• Price Range: {dashboard_context['price_range']}")
                     
                 except Exception as e:
                     logger.error(f"Storage error: {str(e)}")

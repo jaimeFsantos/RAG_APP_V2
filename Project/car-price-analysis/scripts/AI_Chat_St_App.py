@@ -2,9 +2,12 @@ import streamlit as st
 import logging
 from AI_Chat_Analyst_Script import QASystem
 import json  # Add this import
+import os
+import boto3
+
 
 # Set up logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG)    
 logger = logging.getLogger(__name__)
 
 def create_visualization_data(qa_system, query, response):
@@ -62,21 +65,119 @@ if 'last_query' not in st.session_state:
 
 # Initialize the QASystem
 def initialize_qa_system():
-    sources = [
-        {"path": "Sources/mmv.pdf", "type": "pdf"},
-        {"path": "Sources/autoconsumer.pdf", "type": "pdf"},
-        {"path": "Sources/car_prices.csv", "type": "csv",
-         "columns": ['year', 'make', 'model', 'trim', 'body', 'transmission', 
-                    'vin', 'state', 'condition', 'odometer', 'color', 'interior', 
-                    'seller', 'mmr', 'sellingprice', 'saledate']}
-    ]
+    """Initialize the QA system with error handling and storage fallback"""
     try:
+        # Configure sources with fallback paths
+        sources = []
+        
+        # Add cloud sources if available
+        s3_client = get_s3_client()  # Helper function to get S3 client
+        if s3_client:
+            try:
+                # Try to get sources from S3
+                sources.extend(get_cloud_sources(s3_client))
+            except Exception as cloud_err:
+                logger.warning(f"Could not access cloud sources: {cloud_err}")
+                
+        # Add local sources as fallback
+        local_sources = [
+            {"path": "local_storage/car_prices.csv", "type": "csv",
+             "columns": ['year', 'make', 'model', 'trim', 'body', 'transmission', 
+                        'vin', 'state', 'condition', 'odometer', 'color', 'interior', 
+                        'seller', 'mmr', 'sellingprice', 'saledate']},
+            {"path": "local_storage/mmv.pdf", "type": "pdf"},
+            {"path": "local_storage/autoconsumer.pdf", "type": "pdf"}
+        ]
+        sources.extend([s for s in local_sources if os.path.exists(s["path"])])
+        
+        if not sources:
+            raise ValueError("No valid sources found in cloud or local storage")
+
+        # Initialize QA system with proper checks
         st.session_state.qa_system = QASystem(chunk_size=1000, chunk_overlap=50)
-        st.session_state.chain = st.session_state.qa_system.create_chain(sources)
+        
+        # Create chain with explicit error handling
+        chain = st.session_state.qa_system.create_chain(sources)
+        if chain is None:
+            raise ValueError("Failed to create QA chain")
+            
+        st.session_state.chain = chain
         logger.info("QA System initialized successfully")
+        return True
+        
     except Exception as e:
         logger.error(f"Error initializing QA System: {e}")
-        raise e
+        st.error("Failed to initialize QA system. Please check logs.")
+        return False
+
+def get_s3_client():
+    """Get S3 client with proper error handling"""
+    try:
+        return boto3.client(
+            's3',
+            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+            region_name=os.getenv('AWS_REGION', 'us-east-1')
+        )
+    except Exception as e:
+        logger.warning(f"Could not initialize S3 client: {e}")
+        return None
+
+def get_cloud_sources(s3_client):
+    """Get sources from S3 with error handling"""
+    cloud_sources = []
+    try:
+        # List objects in the source bucket
+        bucket = os.getenv('S3_BUCKET_NAME')
+        response = s3_client.list_objects_v2(Bucket=bucket, Prefix='sources/')
+        
+        for obj in response.get('Contents', []):
+            key = obj['Key']
+            if key.endswith('.csv'):
+                cloud_sources.append({
+                    "path": f"s3://{bucket}/{key}",
+                    "type": "csv",
+                    "columns": ['year', 'make', 'model', 'trim', 'body', 'transmission', 
+                               'vin', 'state', 'condition', 'odometer', 'color', 'interior', 
+                               'seller', 'mmr', 'sellingprice', 'saledate']
+                })
+            elif key.endswith('.pdf'):
+                cloud_sources.append({
+                    "path": f"s3://{bucket}/{key}",
+                    "type": "pdf"
+                })
+    except Exception as e:
+        logger.error(f"Error getting cloud sources: {e}")
+        
+    return cloud_sources
+
+def get_cloud_sources(s3_client):
+    """Get sources from S3 with error handling"""
+    cloud_sources = []
+    try:
+        # List objects in the source bucket
+        bucket = os.getenv('S3_BUCKET_NAME')
+        response = s3_client.list_objects_v2(Bucket=bucket, Prefix='sources/')
+        
+        for obj in response.get('Contents', []):
+            key = obj['Key']
+            if key.endswith('.csv'):
+                cloud_sources.append({
+                    "path": f"s3://{bucket}/{key}",
+                    "type": "csv",
+                    "columns": ['year', 'make', 'model', 'trim', 'body', 'transmission', 
+                               'vin', 'state', 'condition', 'odometer', 'color', 'interior', 
+                               'seller', 'mmr', 'sellingprice', 'saledate']
+                })
+            elif key.endswith('.pdf'):
+                cloud_sources.append({
+                    "path": f"s3://{bucket}/{key}",
+                    "type": "pdf"
+                })
+    except Exception as e:
+        logger.error(f"Error getting cloud sources: {e}")
+        
+    return cloud_sources
 
 # Page configuration
 st.set_page_config(

@@ -329,6 +329,7 @@ class CarPricePredictor:
         }
         
         self.selected_models = models if models else list(self.available_models.keys())
+        
         self.param_grids = {
             'regular': {
                 'rf': {
@@ -377,6 +378,40 @@ class CarPricePredictor:
                 }
             }
         }
+        
+    def get_prediction_context(self, prediction_result, input_data):
+        """
+        Format prediction results for QA system context
+        
+        Args:
+            prediction_result: Dictionary with prediction outputs
+            input_data: Original input features
+            
+        Returns:
+            Dict with formatted context
+        """
+        context = {
+            'prediction': {
+                'price': prediction_result['predicted_price'],
+                'confidence_interval': prediction_result['confidence_interval'],
+                'error_margin': prediction_result['mape']
+            },
+            'input_features': input_data,
+            'model_performance': {
+                name: {
+                    'rmse': metrics['rmse'],
+                    'r2': metrics['r2']
+                }
+                for name, metrics in self.metrics.items()
+            },
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Add SHAP values if available
+        if hasattr(self, 'feature_importance'):
+            context['feature_importance'] = self.feature_importance
+            
+        return context
 
         
     def validate_data(self, df: pd.DataFrame) -> bool:

@@ -84,116 +84,102 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
+# Add after the MarketAnalyzer class
 class VisualizationGenerator:
-    """
-    Handles generation of visualizations for different query types.
-    """
+    """Handles generation of visualizations for QA responses"""
     
-    @staticmethod
-    def create_price_trends_viz(data: dict) -> str:
+    def create_visualization(self, viz_type: str, data: dict) -> go.Figure:
         """
-        Create price trends visualization.
+        Create visualization based on type and data
         
         Args:
-            data: Dictionary containing date and price data
+            viz_type: Type of visualization to create
+            data: Data for visualization
             
         Returns:
-            str: JSON string of the plotly figure
+            plotly.graph_objects.Figure
         """
+        try:
+            if viz_type == 'price_trends':
+                return self._create_price_trend_viz(data)
+            elif viz_type == 'feature_importance':
+                return self._create_feature_importance_viz(data)
+            elif viz_type == 'market_analysis':
+                return self._create_market_analysis_viz(data)
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error creating visualization: {e}")
+            return None
+            
+    def _create_price_trend_viz(self, data: dict) -> go.Figure:
+        """Create price trend visualization"""
         fig = go.Figure()
-        dates = list(data.keys())
-        prices = list(data.values())
         
+        # Add price trend line
         fig.add_trace(go.Scatter(
-            x=dates,
-            y=prices,
+            x=list(data.get('dates', [])),
+            y=list(data.get('prices', [])),
             mode='lines+markers',
-            name='Average Price'
+            name='Price Trend'
         ))
         
         fig.update_layout(
             title='Price Trends Over Time',
             xaxis_title='Date',
-            yaxis_title='Average Price ($)',
-            height=400
+            yaxis_title='Price ($)',
+            height=400,
+            template='plotly_white'
         )
         
-        return fig.to_json()
-
-    @staticmethod
-    def create_feature_importance_viz(data: dict) -> str:
-        """
-        Create feature importance visualization.
+        return fig
         
-        Args:
-            data: Dictionary of features and their importance values
-            
-        Returns:
-            str: JSON string of the plotly figure
-        """
-        # Sort features by absolute importance
-        sorted_features = dict(sorted(
-            data.items(),
-            key=lambda x: abs(x[1]),
-            reverse=True
-        )[:10])
-        
+    def _create_feature_importance_viz(self, data: dict) -> go.Figure:
+        """Create feature importance visualization"""
         fig = go.Figure()
+        
+        # Sort features by importance
+        features = list(data.keys())
+        importances = list(data.values())
+        
         fig.add_trace(go.Bar(
-            y=list(sorted_features.keys()),
-            x=list(sorted_features.values()),
-            orientation='h'
+            y=features,
+            x=importances,
+            orientation='h',
+            marker_color='rgb(55, 83, 109)'
         ))
         
         fig.update_layout(
-            title='Top 10 Feature Importance',
+            title='Feature Importance',
             xaxis_title='Importance',
             yaxis_title='Feature',
-            height=400
+            height=400,
+            template='plotly_white'
         )
         
-        return fig.to_json()
-
-    @staticmethod
-    def create_market_analysis_viz(data: dict) -> str:
-        """
-        Create market analysis visualization.
+        return fig
         
-        Args:
-            data: Dictionary containing market analysis data
-            
-        Returns:
-            str: JSON string of the plotly figure
-        """
+    def _create_market_analysis_viz(self, data: dict) -> go.Figure:
+        """Create market analysis visualization"""
         fig = go.Figure()
         
-        if 'popular_colors' in data:
-            colors = data['popular_colors']
+        # Add market segments
+        if 'segments' in data:
             fig.add_trace(go.Bar(
-                x=list(colors.keys()),
-                y=list(colors.values()),
-                name='Color Distribution'
-            ))
-            
-        if 'transmission_split' in data:
-            trans = data['transmission_split']
-            fig.add_trace(go.Bar(
-                x=list(trans.keys()),
-                y=list(trans.values()),
-                name='Transmission Distribution'
+                x=list(data['segments'].keys()),
+                y=list(data['segments'].values()),
+                name='Market Distribution'
             ))
             
         fig.update_layout(
-            title='Market Distribution Analysis',
-            xaxis_title='Category',
+            title='Market Analysis',
+            xaxis_title='Segment',
             yaxis_title='Count',
             height=400,
-            barmode='group'
+            template='plotly_white'
         )
         
-        return fig.to_json()
-
+        return fig
 
 class PreCalculationPipeline:
     def __init__(self, cache_dir=".cache"):
@@ -436,7 +422,7 @@ def compute_shap_values(model, input_data, cache: SHAPCache) -> np.ndarray:
 
 
 
-#############################################################################################################
+#####################################################################################################################################    
 class DocumentLoader:
     def __init__(self, batch_size: int = 500):
         self.batch_size = batch_size
@@ -1207,10 +1193,6 @@ class DocumentTracer:
             print(f"Content Preview: {trace['content_preview']}")
             print("-" * 30)
 
-    
-import pandas as pd
-import numpy as np
-from typing import Dict, List
 
 class MarketAnalyzer:
     def __init__(self, model_years=range(1992, 2025)):
@@ -1588,40 +1570,6 @@ class QASystem(MarketAnalyzer):
                 
         return all_documents
     
-    def generate_response(self, query: str) -> Dict[str, Any]:
-        """
-        Generate a response including text and visualization if applicable.
-        
-        Args:
-            query (str): The user's question
-            
-        Returns:
-            Dict[str, Any]: Response containing text and optional visualization data
-        """
-        try:
-            # Determine visualization type
-            viz_type = self._determine_visualization_type(query)
-            
-            # Get text response
-            response = self.chain.invoke(query)
-            
-            # Generate visualization if applicable
-            viz_data = None
-            if viz_type:
-                viz_data = self.generate_visualization(query, viz_type)
-                
-            return {
-                'text_response': response,
-                'visualization': viz_data
-            }
-            
-        except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            return {
-                'text_response': f"Error generating response: {str(e)}",
-                'visualization': None
-            }
-
     def _create_market_analysis_documents(self) -> List[Document]:
         """Create documents from market analysis insights with improved error handling"""
         market_docs = []
@@ -1727,102 +1675,140 @@ class QASystem(MarketAnalyzer):
         except Exception as e:
             logger.error(f"Error in SHAP analysis: {str(e)}")
             return "SHAP analysis failed"
-
-    def create_chain(self, sources: List[Dict[str, Union[str, List[str]]]]):
+        
+    def ask(self, query: str) -> str:
         """
-        Create enhanced QA chain with integrated market analysis and predictor context.
+        Wrapper method for chain invocation to maintain compatibility with testing framework
         
         Args:
-            sources: List of source documents
+            query (str): The question to be answered
             
         Returns:
-            Chain: The configured QA chain
+            str: Response from the QA system
         """
         try:
-            # Process predictor outputs if available
-            if hasattr(self, 'predictor_context') and self.predictor_context:
-                sources.append({
-                    "content": self.predictor_context,
-                    "metadata": {"source": "predictor_output", "type": "prediction_analysis"}
-                })
+            if self.chain is None:
+                logger.error("Chain not initialized")
+                return "System not ready. Please initialize first."
+                
+            response = self.chain.invoke(query)
+            return response
             
-            # Process documents and generate market analysis
-            documents = self.process_sources(sources)
-            
-            if not documents:
-                logger.error("No documents were successfully loaded")
-                return None
-
-            # Create vector store
-            embedding_model = OllamaEmbeddings(
-                model="nomic-embed-text"
-            )
-            
-            # Split documents
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=self.chunk_size,
-                chunk_overlap=self.chunk_overlap
-            )
-            chunks = splitter.split_documents(documents)
-            
-            if not chunks:
-                logger.error("No chunks created from documents")
-                return None
-
-            self.vector_db = FAISS.from_documents(
-                documents=chunks,
-                embedding=embedding_model
-            )
-            
-            # Initialize LLM
-            llm = ChatOllama(model="mistral")
-            
-            # Create balanced retriever
-            base_retriever = self.vector_db.as_retriever(search_kwargs={"k": 10})
-            balanced_retriever = BalancedRetriever(base_retriever, min_docs_per_type=2)
-            
-            # Enhanced template with visualization support
-            template = """Analyze the following question using available context and market analysis:
-
-    Question: {question}
-
-    Context from documents and market analysis:
-    {context}
-
-    Please provide a comprehensive response that:
-    1. Addresses the specific question
-    2. Incorporates relevant market trends and patterns
-    3. Provides specific data points and statistics when available
-    4. Offers actionable insights based on the analysis
-    5. References any prediction results if relevant
-    6. Suggests visual patterns or trends that might be helpful
-
-    Response format:
-    - Start with a direct answer to the question
-    - Include supporting data and analysis
-    - End with actionable insights or recommendations
-    """
-            
-            prompt = ChatPromptTemplate.from_template(template)
-            
-            def trace_and_retrieve(question: str):
-                retrieved_docs = balanced_retriever.get_relevant_documents(question)
-                self.document_tracer.trace_documents(question, retrieved_docs)
-                return "\n\n".join([doc.page_content for doc in retrieved_docs])
-
-            chain = (
-                {"context": trace_and_retrieve, "question": RunnablePassthrough()} 
-                | prompt 
-                | llm 
-                | StrOutputParser()
-            )
-            
-            return chain
-
         except Exception as e:
-            logger.error(f"Error creating QA chain: {e}")
+            logger.error(f"Error in ask method: {e}")
+            return f"Error processing query: {str(e)}"
+
+    def create_chain(self, sources: List[Dict[str, Union[str, List[str]]]]):
+        """Create QA chain with robust error handling and storage management"""
+        try:
+            if not sources:
+                raise ValueError("No sources provided")
+                
+            # Process sources with storage handling
+            documents = []
+            for source in sources:
+                try:
+                    # Handle S3 paths
+                    if source["path"].startswith("s3://"):
+                        content = self._get_s3_content(source["path"])
+                        if content:
+                            if source["type"] == "csv":
+                                docs = self._process_csv_content(content, source.get("columns"))
+                            else:
+                                docs = self._process_pdf_content(content)
+                            documents.extend(docs)
+                    # Handle local paths
+                    else:
+                        if os.path.exists(source["path"]):
+                            if source["type"] == "csv":
+                                docs = self.loader.load_csv(source["path"], source.get("columns"))
+                            else:
+                                docs = self.loader.load_pdf(source["path"])
+                            documents.extend(docs)
+                except Exception as e:
+                    logger.error(f"Error processing source {source['path']}: {e}")
+                    continue
+                    
+            if not documents:
+                raise ValueError("No documents could be processed from sources")
+
+            # Initialize embedding model
+            try:
+                embedding_model = OllamaEmbeddings(
+                    model="nomic-embed-text"
+                )
+            except Exception as e:
+                logger.error(f"Error initializing embedding model: {e}")
+                raise
+                
+            # Create vector store
+            try:
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=self.chunk_size,
+                    chunk_overlap=self.chunk_overlap
+                )
+                splits = text_splitter.split_documents(documents)
+                
+                self.vector_db = FAISS.from_documents(
+                    documents=splits,
+                    embedding=embedding_model
+                )
+            except Exception as e:
+                logger.error(f"Error creating vector store: {e}")
+                raise
+                
+            # Create and verify chain
+            try:
+                template = """Question: {question}
+                Context: {context}
+                Please provide a comprehensive response."""
+                
+                prompt = ChatPromptTemplate.from_template(template)
+                
+                # Initialize LLM
+                llm = ChatOllama(model="mistral")
+                
+                # Create retriever
+                retriever = self.vector_db.as_retriever(search_kwargs={"k": 4})
+                
+                def get_context(question):
+                    docs = retriever.get_relevant_documents(question)
+                    return "\n".join(doc.page_content for doc in docs)
+                
+                chain = (
+                    {"context": get_context, "question": RunnablePassthrough()}
+                    | prompt 
+                    | llm 
+                    | StrOutputParser()
+                )
+                
+                # Verify chain works
+                test_response = chain.invoke("test")
+                if test_response is None:
+                    raise ValueError("Chain verification failed")
+                    
+                return chain
+                
+            except Exception as e:
+                logger.error(f"Error creating chain: {e}")
+                raise
+                
+        except Exception as e:
+            logger.error(f"Error in create_chain: {e}")
             return None
-    
+
+    def _get_s3_content(self, s3_path):
+        """Get content from S3 with error handling"""
+        try:
+            bucket = s3_path.split('/')[2]
+            key = '/'.join(s3_path.split('/')[3:])
+            
+            s3_client = boto3.client('s3')
+            response = s3_client.get_object(Bucket=bucket, Key=key)
+            return response['Body'].read()
+        except Exception as e:
+            logger.error(f"Error reading from S3: {e}")
+            return None
 
 @dataclass
 class PredictionContext:
@@ -1843,13 +1829,50 @@ class EnhancedQASystem(QASystem):
         s3_client: AWS S3 client for cloud storage
         bucket_name (str): S3 bucket name
     """
-    
+
     def __init__(self, chunk_size: int = 500, chunk_overlap: int = 25):
         super().__init__(chunk_size, chunk_overlap)
         self.prediction_store = {}
         self.visualization_cache = {}
         self.setup_cloud_storage()
         self.setup_visualization_handlers()
+        self.viz_generator = VisualizationGenerator()
+        
+    def generate_response(self, query: str) -> Dict[str, Any]:
+        if not hasattr(self, 'chain') or self.chain is None:
+            logger.error("Chain not initialized")
+            return {
+                'text': "System not ready. Please initialize first.",
+                'visualization': None
+            }
+        
+        try:
+            response = self.chain.invoke(query)
+            viz_type = self._determine_visualization_type(query)
+            viz_fig = None
+            
+            if viz_type and hasattr(self, 'data_df'):
+                if viz_type == 'price_trends':
+                    data = self._get_price_trends_data()
+                elif viz_type == 'feature_importance':
+                    data = self._get_feature_importance_data() 
+                elif viz_type == 'market_analysis':
+                    data = self._get_market_analysis_data()
+                    
+                if data:
+                    viz_fig = self.viz_generator.create_visualization(viz_type, data)
+            
+            return {
+                'text': response,
+                'visualization': viz_fig
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in generate_response: {e}")
+            return {
+                'text': "Error processing query. Please try again.",
+                'visualization': None
+            }
         
     def setup_cloud_storage(self):
         """Initialize AWS S3 connection with error handling"""
