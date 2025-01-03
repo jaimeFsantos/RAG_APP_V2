@@ -675,6 +675,10 @@ class CarPricePredictor:
         self.metrics = {}
         self.unique_values = {}
         
+        # Use EFS for model persistence
+        self.model_path = os.getenv('MODEL_PATH', '/mnt/efs/models')
+        os.makedirs(self.model_path, exist_ok=True)
+        
         self._initialize_models(models)
         self._initialize_param_grids()
     def _initialize_models(self, models):

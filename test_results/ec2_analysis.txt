@@ -1,0 +1,12 @@
+Resource Usage Analysis
+======================
+
+Memory Usage:
+- Peak: 500.53MB
+- Average: 498.04MB
+- EC2 Limit: 1024MB
+
+CPU Usage:
+- Peak: 16.7%
+- Average: 7.6%
+

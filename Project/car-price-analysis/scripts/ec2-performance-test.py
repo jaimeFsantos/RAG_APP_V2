@@ -23,6 +23,7 @@ import threading
 import queue
 import gc
 from typing import Dict, List, Optional
+import os
 
 # Configure logging
 logging.basicConfig(
@@ -57,7 +58,8 @@ class EC2ResourceMonitor:
     def stop_monitoring(self):
         """Stop monitoring thread and save results"""
         self.monitoring = False
-        self.monitor_thread.join()
+        if hasattr(self, 'monitor_thread'):
+            self.monitor_thread.join()
         
         # Get all metrics from queue
         metrics = []
@@ -69,7 +71,7 @@ class EC2ResourceMonitor:
             df = pd.DataFrame(metrics)
             self._save_metrics(df)
             self._analyze_results(df)
-        
+
     def _monitor_resources(self, interval: float):
         """Monitor system resources"""
         while self.monitoring:
@@ -95,7 +97,7 @@ class EC2ResourceMonitor:
                 logger.error(f"Error monitoring resources: {e}")
                 
             time.sleep(interval)
-            
+
     def _save_metrics(self, df: pd.DataFrame):
         """Save metrics to CSV"""
         try:
@@ -108,7 +110,7 @@ class EC2ResourceMonitor:
             
         except Exception as e:
             logger.error(f"Error saving metrics: {e}")
-            
+
     def _create_visualization(self, df: pd.DataFrame):
         """Create resource usage visualization"""
         try:
@@ -119,12 +121,14 @@ class EC2ResourceMonitor:
             ax1.axhline(y=95, color='r', linestyle='--', label='EC2 CPU Limit')
             ax1.set_title('CPU Usage')
             ax1.set_ylabel('CPU %')
+            ax1.legend()
             
             # Memory Usage
             sns.lineplot(data=df, x=df.index, y='memory_used', ax=ax2)
             ax2.axhline(y=self.RAM_LIMIT_MB, color='r', linestyle='--', label='EC2 RAM Limit')
             ax2.set_title('Memory Usage')
             ax2.set_ylabel('Memory (MB)')
+            ax2.legend()
             
             plt.tight_layout()
             plt.savefig(self.output_dir / 'ec2_resource_usage.png')
@@ -132,7 +136,7 @@ class EC2ResourceMonitor:
             
         except Exception as e:
             logger.error(f"Error creating visualization: {e}")
-            
+
     def _analyze_results(self, df: pd.DataFrame):
         """Analyze resource usage and provide recommendations"""
         analysis = {
@@ -178,32 +182,89 @@ class EC2ResourceMonitor:
                     
         logger.info(f"Analysis saved to {self.output_dir / 'ec2_analysis.txt'}")
 
+def generate_test_data(n_samples: int = 1000) -> pd.DataFrame:
+    """Generate realistic test data with all required columns"""
+    np.random.seed(42)
+    
+    makes = ['Toyota', 'Honda', 'Ford', 'BMW', 'Mercedes']
+    models = {
+        'Toyota': ['Camry', 'Corolla', 'RAV4'],
+        'Honda': ['Civic', 'Accord', 'CR-V'],
+        'Ford': ['F-150', 'Focus', 'Escape'],
+        'BMW': ['3 Series', '5 Series', 'X5'],
+        'Mercedes': ['C-Class', 'E-Class', 'GLC']
+    }
+    trims = ['Base', 'Sport', 'Limited', 'Premium']
+    sellers = ['Dealer', 'Private', 'Fleet']
+    
+    data = []
+    for _ in range(n_samples):
+        make = np.random.choice(makes)
+        model = np.random.choice(models[make])
+        row = {
+            'make': make,
+            'model': model,
+            'trim': np.random.choice(trims),
+            'year': np.random.randint(2010, 2024),
+            'condition': np.random.uniform(1, 50),
+            'odometer': np.random.randint(0, 150000),
+            'sellingprice': np.random.uniform(15000, 50000),
+            'state': np.random.choice(['CA', 'NY', 'TX']),
+            'body': np.random.choice(['Sedan', 'SUV', 'Truck']),
+            'transmission': np.random.choice(['Auto', 'Manual']),
+            'color': np.random.choice(['Black', 'White', 'Silver']),
+            'interior': np.random.choice(['Black', 'Tan', 'Gray']),
+            'seller': np.random.choice(sellers)
+        }
+        data.append(row)
+    
+    return pd.DataFrame(data)
+
 def test_qa_system():
-    """Test QA system performance"""
+    """Test QA system performance with proper initialization"""
     from AI_Chat_Analyst_Script import EnhancedQASystem
     
     monitor = EC2ResourceMonitor()
-    qa_system = EnhancedQASystem(chunk_size=500, chunk_overlap=25)  # Reduced chunk size for EC2
+    qa_system = EnhancedQASystem(chunk_size=500, chunk_overlap=25)
     
-    test_queries = [
-        "What factors affect car prices?",
-        "Compare Toyota and Honda resale values",
-        "Analyze market trends for SUVs",
-        "What are the most popular car colors?",
-        "How does mileage affect price?"
-    ]
+    # Generate and save test data
+    df = generate_test_data()
+    test_csv_path = "test_results/test_data.csv"
+    df.to_csv(test_csv_path, index=False)
+    
+    # Initialize QA system with test data
+    sources = [{
+        "path": test_csv_path,
+        "type": "csv",
+        "columns": df.columns.tolist()
+    }]
     
     monitor.start_monitoring()
     
     try:
+        # Create chain first
+        logger.info("Initializing QA system...")
+        chain = qa_system.create_chain(sources)
+        
+        if chain is None:
+            raise ValueError("Failed to initialize QA chain")
+        
+        # Test queries
+        test_queries = [
+            "What factors affect car prices?",
+            "Compare Toyota and Honda resale values",
+            "Analyze market trends for SUVs",
+            "What are the most popular car colors?",
+            "How does mileage affect price?"
+        ]
+        
         for query in test_queries:
             logger.info(f"Testing query: {query}")
-            response = qa_system.ask(query)
+            response = chain.invoke(query)
+            logger.info("Query processed successfully")
             
             # Force garbage collection between queries
             gc.collect()
-            
-            # Small delay to prevent resource spikes
             time.sleep(2)
             
     except Exception as e:
@@ -211,28 +272,20 @@ def test_qa_system():
         
     finally:
         monitor.stop_monitoring()
+        # Cleanup test file
+        try:
+            os.remove(test_csv_path)
+        except:
+            pass
 
 def test_price_predictor():
-    """Test price predictor performance"""
+    """Test price predictor performance with complete test data"""
     from Pricing_Func import CarPricePredictor
     
     monitor = EC2ResourceMonitor()
     
-    # Generate test data
-    np.random.seed(42)
-    n_samples = 1000  # Reduced sample size for testing
-    
-    test_data = pd.DataFrame({
-        'year': np.random.randint(2010, 2024, n_samples),
-        'condition': np.random.uniform(1, 50, n_samples),
-        'odometer': np.random.randint(0, 150000, n_samples),
-        'sellingprice': np.random.uniform(15000, 50000, n_samples),
-        'state': np.random.choice(['CA', 'NY', 'TX'], n_samples),
-        'body': np.random.choice(['Sedan', 'SUV', 'Truck'], n_samples),
-        'transmission': np.random.choice(['Auto', 'Manual'], n_samples),
-        'color': np.random.choice(['Black', 'White', 'Silver'], n_samples),
-        'interior': np.random.choice(['Black', 'Tan', 'Gray'], n_samples)
-    })
+    # Generate complete test data
+    test_data = generate_test_data(1000)  # Reduced sample size for testing
     
     predictor = CarPricePredictor(
         models=['rf'],  # Use only Random Forest for testing
@@ -262,7 +315,11 @@ def test_price_predictor():
             'body': 'Sedan',
             'transmission': 'Auto',
             'color': 'Black',
-            'interior': 'Black'
+            'interior': 'Black',
+            'make': 'Toyota',
+            'model': 'Camry',
+            'trim': 'Base',
+            'seller': 'Dealer'
         }
         
         for _ in range(5):  # Test multiple predictions
