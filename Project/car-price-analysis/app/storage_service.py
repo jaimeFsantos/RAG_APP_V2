@@ -198,20 +198,36 @@ class LocalStorageService(StorageService):
             logger.error(f"Error uploading file: {e}")
             raise
 
-    def cleanup_old_files(self, max_age_hours: int = 24):
-        """Clean up old files from local storage"""
+    def cleanup_old_files(self, max_age_hours: int = 1, max_folder_size_mb: int = 350):
+        """Clean up old files from local storage if the folder exceeds max size"""
         try:
             current_time = datetime.now()
-            
+            total_size = 0
+
+            # Calculate the total size of the folder
             for file_path in self.storage_dir.glob('*'):
-                if file_path.name == 'manifest.json':
-                    continue
-                    
-                file_age = current_time - datetime.fromtimestamp(file_path.stat().st_mtime)
-                if file_age.total_seconds() > max_age_hours * 3600:
-                    file_path.unlink()
-                    logger.info(f"Cleaned up old file: {file_path.name}")
-                    
+                if file_path.is_file():
+                    total_size += file_path.stat().st_size
+
+            # Convert total size to MB
+            total_size_mb = total_size / (1024 * 1024)
+
+            if total_size_mb > max_folder_size_mb:
+                logger.info(f"Folder size ({total_size_mb:.2f} MB) exceeds limit ({max_folder_size_mb} MB). Cleaning up.")
+
+                for file_path in self.storage_dir.glob('*'):
+                    if file_path.name == 'manifest.json':
+                        continue
+
+                    file_age = current_time - datetime.fromtimestamp(file_path.stat().st_mtime)
+
+                    # Delete files older than max_age_hours
+                    if file_age.total_seconds() > max_age_hours * 3600:
+                        file_path.unlink()
+                        logger.info(f"Cleaned up old file: {file_path.name}")
+            else:
+                logger.info(f"Folder size ({total_size_mb:.2f} MB) is within the limit.")
+
         except Exception as e:
             logger.error(f"Error cleaning up files: {e}")
 

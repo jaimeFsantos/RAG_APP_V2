@@ -469,6 +469,11 @@
       "original_name": "car_data_20250103_165708.csv",
       "timestamp": "20250103_165711",
       "size": 92494322
+    },
+    "20250104_000120_car_prices.csv": {
+      "original_name": "car_prices.csv",
+      "timestamp": "20250104_000120",
+      "size": 88047552
     }
   }
 }
