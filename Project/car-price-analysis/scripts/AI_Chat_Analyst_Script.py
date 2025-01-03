@@ -1678,7 +1678,7 @@ class QASystem(MarketAnalyzer):
         
     def ask(self, query: str) -> str:
         """
-        Wrapper method for chain invocation to maintain compatibility with testing framework
+        Wrapper method for chain invocation with better error handling
         
         Args:
             query (str): The question to be answered
@@ -1687,13 +1687,39 @@ class QASystem(MarketAnalyzer):
             str: Response from the QA system
         """
         try:
+            # First validate chain exists
+            if not hasattr(self, 'chain') or self.chain is None:
+                # Try to initialize chain if not done
+                if hasattr(self, 'vector_db') and self.vector_db is not None:
+                    template = """Question: {question}
+                    Context: {context}
+                    Please provide a comprehensive response."""
+                    
+                    prompt = ChatPromptTemplate.from_template(template)
+                    llm = ChatOllama(model="mistral")
+                    retriever = self.vector_db.as_retriever(search_kwargs={"k": 4})
+                    
+                    def get_context(question):
+                        docs = retriever.get_relevant_documents(question)
+                        return "\n".join(doc.page_content for doc in docs)
+                    
+                    self.chain = (
+                        {"context": get_context, "question": RunnablePassthrough()}
+                        | prompt 
+                        | llm 
+                        | StrOutputParser()
+                    )
+                else:
+                    logger.error("Vector store not initialized")
+                    return "System not ready. Please ensure documents are loaded first."
+                    
             if self.chain is None:
-                logger.error("Chain not initialized")
+                logger.error("Chain initialization failed")
                 return "System not ready. Please initialize first."
-                
+                    
             response = self.chain.invoke(query)
             return response
-            
+                
         except Exception as e:
             logger.error(f"Error in ask method: {e}")
             return f"Error processing query: {str(e)}"
@@ -1702,8 +1728,19 @@ class QASystem(MarketAnalyzer):
         """Create QA chain with robust error handling and storage management"""
         try:
             if not sources:
-                raise ValueError("No sources provided")
-                
+                logger.error("No sources provided")
+                return None 
+            
+        # Initialize components first
+            try:
+                embedding_model = OllamaEmbeddings(
+                    model="nomic-embed-text"
+                )
+                llm = ChatOllama(model="mistral")
+            except Exception as e:
+                logger.error(f"Error initializing core components: {e}")
+                return None
+
             # Process sources with storage handling
             documents = []
             for source in sources:
@@ -1730,17 +1767,9 @@ class QASystem(MarketAnalyzer):
                     continue
                     
             if not documents:
-                raise ValueError("No documents could be processed from sources")
-
-            # Initialize embedding model
-            try:
-                embedding_model = OllamaEmbeddings(
-                    model="nomic-embed-text"
-                )
-            except Exception as e:
-                logger.error(f"Error initializing embedding model: {e}")
-                raise
-                
+                logger.error("No documents could be processed from sources")
+                return None
+            
             # Create vector store
             try:
                 text_splitter = RecursiveCharacterTextSplitter(
@@ -1838,42 +1867,48 @@ class EnhancedQASystem(QASystem):
         self.setup_visualization_handlers()
         self.viz_generator = VisualizationGenerator()
         
+
+    # Add the new generate_response method here, right after ask()
     def generate_response(self, query: str) -> Dict[str, Any]:
-        if not hasattr(self, 'chain') or self.chain is None:
-            logger.error("Chain not initialized")
-            return {
-                'text': "System not ready. Please initialize first.",
-                'visualization': None
-            }
-        
+        """Generate response with optional visualization"""
         try:
-            response = self.chain.invoke(query)
-            viz_type = self._determine_visualization_type(query)
-            viz_fig = None
+            # First try to get text response using ask() which includes chain validation
+            text_response = self.ask(query)
             
-            if viz_type and hasattr(self, 'data_df'):
-                if viz_type == 'price_trends':
-                    data = self._get_price_trends_data()
-                elif viz_type == 'feature_importance':
-                    data = self._get_feature_importance_data() 
-                elif viz_type == 'market_analysis':
-                    data = self._get_market_analysis_data()
-                    
-                if data:
-                    viz_fig = self.viz_generator.create_visualization(viz_type, data)
-            
-            return {
-                'text': response,
-                'visualization': viz_fig
-            }
-            
+            # Only attempt visualization if text response was successful
+            if text_response and not text_response.startswith("Error") and not text_response.startswith("System not ready"):
+                # Only attempt visualization if we have data
+                viz_fig = None
+                if hasattr(self, 'data_df') and self.data_df is not None:
+                    viz_type = self._determine_visualization_type(query)
+                    if viz_type:
+                        viz_data = None
+                        if viz_type == 'price_trends':
+                            viz_data = self._get_price_trends_data()
+                        elif viz_type == 'feature_importance':
+                            viz_data = self._get_feature_importance_data()
+                        elif viz_type == 'market_analysis':
+                            viz_data = self._get_market_analysis_data()
+                            
+                        if viz_data and hasattr(self, 'viz_generator'):
+                            viz_fig = self.viz_generator.create_visualization(viz_type, viz_data)
+                
+                return {
+                    'text': text_response,
+                    'visualization': viz_fig
+                }
+            else:
+                return {
+                    'text': text_response,
+                    'visualization': None
+                }
+                
         except Exception as e:
-            logger.error(f"Error in generate_response: {e}")
+            logger.error(f"Error generating response: {e}")
             return {
-                'text': "Error processing query. Please try again.",
+                'text': "Error processing request. Please try again.",
                 'visualization': None
             }
-        
     def setup_cloud_storage(self):
         """Initialize AWS S3 connection with error handling"""
         try:

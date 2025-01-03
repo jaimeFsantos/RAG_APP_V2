@@ -68,6 +68,10 @@ class CombinedCarApp:
             if 'model_trained' not in st.session_state:
                 st.session_state.model_trained = False
                 
+            self._initialize_session_state()
+                
+            self.is_cloud = self._is_cloud_environment()
+            self.initialize_services()
             # Initialize storage service using factory
             from storage_service import get_storage_service
             self.storage_service = get_storage_service()
@@ -88,6 +92,132 @@ class CombinedCarApp:
         except Exception as e:
             logger.error(f"Initialization error: {e}", exc_info=True)
             st.error(f"Error initializing app: {str(e)}")
+            
+    
+    def _initialize_session_state(self):
+        """Initialize session state variables"""
+        if 'uploaded_files' not in st.session_state:
+            st.session_state.uploaded_files = {}
+        if 'qa_initialized' not in st.session_state:
+            st.session_state.qa_initialized = False
+        if 'storage_initialized' not in st.session_state:
+            st.session_state.storage_initialized = False
+
+    def _is_cloud_environment(self) -> bool:
+        """Detect if running in cloud environment"""
+        # Check for AWS EC2 environment
+        is_ec2 = os.getenv('AWS_EXECUTION_ENV', '').startswith('AWS_ECS')
+        # Check for explicit cloud mode flag
+        cloud_mode = os.getenv('CLOUD_MODE', '').lower() == 'true'
+        return is_ec2 or cloud_mode
+
+    def initialize_services(self):
+        """Initialize services based on environment"""
+        try:
+            # Initialize storage service
+            if self.is_cloud:
+                from storage_service import CloudStorageService
+                self.storage_service = CloudStorageService()
+                logger.info("Cloud storage service initialized")
+            else:
+                from storage_service import LocalStorageService
+                self.storage_service = LocalStorageService()
+                logger.info("Local storage service initialized")
+                
+            st.session_state.storage_initialized = True
+            
+        except Exception as e:
+            logger.error(f"Service initialization error: {e}")
+            raise
+
+    def handle_file_upload(self, file_obj, file_type: str) -> str:
+        """Handle file upload with environment awareness"""
+        if not st.session_state.storage_initialized:
+            raise RuntimeError("Storage not initialized")
+            
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            
+            if self.is_cloud:
+                # Cloud path
+                file_path = f"uploads/{timestamp}_{file_obj.name}"
+            else:
+                # Local path
+                file_path = f"local_storage/uploads/{timestamp}_{file_obj.name}"
+                
+            # Store file
+            stored_path = self.storage_service.store_file(
+                file_obj.getvalue(), 
+                file_path
+            )
+            
+            # Update session state
+            st.session_state.uploaded_files[file_obj.name] = stored_path
+            logger.info(f"Stored file at: {stored_path}")
+            
+            # Initialize/update QA system
+            self.initialize_qa_system()
+            
+            return stored_path
+            
+        except Exception as e:
+            logger.error(f"File upload error: {e}")
+            raise
+
+    def initialize_qa_system(self):
+        """Initialize QA system with cloud integration and proper error handling"""
+        try:
+            logger.info("Starting QA system initialization")
+        
+            if not hasattr(st.session_state, 'uploaded_files') or not st.session_state.uploaded_files:
+                logger.error("No uploaded files found in session state")
+                return False
+            
+            sources = []
+            
+            # Add CSV source if available
+            csv_files = {k: v for k, v in st.session_state.uploaded_files.items() if k.endswith('.csv')}
+            if csv_files:
+                most_recent_csv = max(csv_files.items(), key=lambda x: x[1])[1]
+                sources.append({
+                    "path": most_recent_csv,
+                    "type": "csv",
+                    "columns": ['year', 'make', 'model', 'trim', 'body', 'transmission', 
+                            'vin', 'state', 'condition', 'odometer', 'color', 'interior', 
+                            'seller', 'mmr', 'sellingprice', 'saledate']
+                })
+                logger.info(f"Added CSV source: {most_recent_csv}")
+            
+            # Add PDF files if available
+            pdf_files = {k: v for k, v in st.session_state.uploaded_files.items() if k.endswith('.pdf')}
+            for pdf_path in pdf_files.values():
+                sources.append({
+                    "path": pdf_path,
+                    "type": "pdf"
+                })
+                logger.info(f"Added PDF source: {pdf_path}")
+            
+            if not sources:
+                logger.error("No valid source files found")
+                return False
+            
+            # Initialize QA system with proper error handling
+            qa_system = EnhancedQASystem(chunk_size=500, chunk_overlap=25)  # Reduced for EC2 free tier
+            chain = qa_system.create_chain(sources)
+            
+            if chain is None:
+                logger.error("Failed to create QA chain")
+                return False
+            
+            st.session_state.qa_system = qa_system
+            st.session_state.chain = chain
+            logger.info("QA System initialized successfully")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error initializing QA System: {e}")
+            return False
 
     def initialize_security_components(self):
         """Initialize security components if not already done"""
@@ -156,66 +286,12 @@ class CombinedCarApp:
             }
             </style>
         """, unsafe_allow_html=True)
-        
-    def initialize_qa_system(self):
-        """Initialize the QA system with all uploaded files"""
-        try:
-            logger.info("Starting QA system initialization")
-            
-            if not hasattr(st.session_state, 'uploaded_files') or not st.session_state.uploaded_files:
-                logger.error("No uploaded files found in session state")
-                return False
-                
-            # Prepare sources list
-            sources = []
-            
-            # Add CSV file if available
-            csv_files = {k: v for k, v in st.session_state.uploaded_files.items() if k.endswith('.csv')}
-            if csv_files:
-                most_recent_csv = max(csv_files.items(), key=lambda x: x[1])[1]
-                sources.append({
-                    "path": most_recent_csv,
-                    "type": "csv",
-                    "columns": ['year', 'make', 'model', 'trim', 'body', 'transmission', 
-                            'vin', 'state', 'condition', 'odometer', 'color', 'interior', 
-                            'seller', 'mmr', 'sellingprice', 'saledate']
-                })
-                logger.info(f"Added CSV source: {most_recent_csv}")
-            
-            # Add PDF files if available
-            pdf_files = {k: v for k, v in st.session_state.uploaded_files.items() if k.endswith('.pdf')}
-            for pdf_name, pdf_path in pdf_files.items():
-                sources.append({
-                    "path": pdf_path,
-                    "type": "pdf"
-                })
-                logger.info(f"Added PDF source: {pdf_path}")
-            
-            if not sources:
-                logger.error("No valid source files found")
-                return False
-                
-            # Initialize QA system with all sources
-            logger.info(f"Initializing QA system with {len(sources)} sources")
-            qa_system = EnhancedQASystem(chunk_size=500, chunk_overlap=25)
-            chain = qa_system.create_chain(sources)
-            
-            if chain is None:
-                logger.error("Failed to create QA chain")
-                return False
-                
-            st.session_state.qa_system = qa_system
-            st.session_state.chain = chain
-            logger.info("QA System initialized successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error initializing QA System: {e}")
-            return False
     
     def render_sidebar(self):
         """Render the sidebar with navigation and file upload"""
         st.sidebar.title("Navigation")
+        
+        
         pages = {
             "Home": "🏠",
             "Price Predictor": "💰",
@@ -653,27 +729,26 @@ class CombinedCarApp:
                 with st.chat_message("assistant"):
                     with st.spinner("Thinking..."):
                         try:
-                            # Get response and determine visualization type
-                            response = st.session_state.qa_system.generate_response(prompt)
-                            
-                            # Analyze query to determine visualization type
-                            viz_type = self._determine_visualization_type(prompt.lower())
-                            
-                            # Display text response
-                            st.markdown(response['text'])
+                            response_data = st.session_state.qa_system.generate_response(prompt)
+                            if isinstance(response_data, dict):
+                                st.markdown(response_data['text'])
+                                if response_data.get('visualization'):
+                                    with viz_col:
+                                        st.plotly_chart(
+                                            response_data['visualization'],
+                                            use_container_width=True
+                                        )
+                                response_text = response_data['text']
+                            else:
+                                # Handle case where we got a direct string response
+                                st.markdown(response_data)
+                                response_text = response_data
+                                
                             st.session_state.messages.append({
-                                "role": "assistant", 
-                                "content": response['text']
+                                "role": "assistant",
+                                "content": response_text
                             })
                         
-                            # Display visualization if available
-                            if response['visualization']:
-                                with viz_col:
-                                    st.plotly_chart(
-                                        response['visualization'],
-                                        use_container_width=True
-                                    )
-                                
                         except Exception as e:
                             logger.error(f"Error generating response: {str(e)}")
                             st.error("Error generating response. Please try again.")
@@ -974,9 +1049,9 @@ class CombinedCarApp:
     def run(self):
         """Main application loop with optional security"""
         # Initialize session state if needed
-        if 'authenticated' not in st.session_state:
+        if 'initialized' not in st.session_state:
+            st.session_state.initialized = False
             st.session_state.authenticated = False
-        if 'last_activity' not in st.session_state:
             st.session_state.last_activity = datetime.now()
         
         # Only check authentication if security is enabled
@@ -1010,8 +1085,21 @@ class CombinedCarApp:
                 if csv_file:
                     df = pd.read_csv(csv_file["path"])
                     logger.info(f"Successfully loaded data with shape: {df.shape}")
+                    
+                    # Initialize QA system if not already done
+                    if not st.session_state.initialized:
+                        with st.spinner("Initializing AI system..."):
+                            success = self.initialize_qa_system()
+                            if success:
+                                st.session_state.initialized = True
+                                st.success("System initialized successfully!")
+                            else:
+                                st.error("Failed to initialize system. Please try again.")
+                                return
+                                
             except Exception as e:
                 st.error(f"Error loading data: {str(e)}")
+                logger.error(f"Error loading data: {str(e)}")
                 return
         
         # Render selected page
