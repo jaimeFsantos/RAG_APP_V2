@@ -25,6 +25,8 @@ import pickle
 import warnings
 from datetime import datetime, timedelta
 from typing import List, Union, Dict, Any, Optional
+import time 
+
 
 # Data manipulation and processing
 import numpy as np
@@ -1730,47 +1732,35 @@ class QASystem(MarketAnalyzer):
             if not sources:
                 logger.error("No sources provided")
                 return None 
-            
-        # Initialize components first
-            try:
-                embedding_model = OllamaEmbeddings(
-                    model="nomic-embed-text"
-                )
-                llm = ChatOllama(model="mistral")
-            except Exception as e:
-                logger.error(f"Error initializing core components: {e}")
-                return None
-
-            # Process sources with storage handling
-            documents = []
-            for source in sources:
-                try:
-                    # Handle S3 paths
-                    if source["path"].startswith("s3://"):
-                        content = self._get_s3_content(source["path"])
-                        if content:
-                            if source["type"] == "csv":
-                                docs = self._process_csv_content(content, source.get("columns"))
-                            else:
-                                docs = self._process_pdf_content(content)
-                            documents.extend(docs)
-                    # Handle local paths
-                    else:
-                        if os.path.exists(source["path"]):
-                            if source["type"] == "csv":
-                                docs = self.loader.load_csv(source["path"], source.get("columns"))
-                            else:
-                                docs = self.loader.load_pdf(source["path"])
-                            documents.extend(docs)
-                except Exception as e:
-                    logger.error(f"Error processing source {source['path']}: {e}")
-                    continue
-                    
+                
+            # Process documents first before initializing components
+            documents = self.process_sources(sources)
             if not documents:
                 logger.error("No documents could be processed from sources")
                 return None
-            
-            # Create vector store
+                
+            # Initialize components with retries and proper configuration
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Initialize without timeout parameter
+                    embedding_model = OllamaEmbeddings(
+                        model="nomic-embed-text"
+                    )
+                    # For ChatOllama, use temperature instead of timeout
+                    llm = ChatOllama(
+                        model="mistral",
+                        temperature=0.7
+                    )
+                    break
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"Failed to initialize components after {max_retries} attempts: {e}")
+                        return None
+                    logger.warning(f"Attempt {attempt + 1} failed, retrying...")
+                    time.sleep(2)
+
+            # Create vector store with memory management
             try:
                 text_splitter = RecursiveCharacterTextSplitter(
                     chunk_size=self.chunk_size,
@@ -1778,32 +1768,50 @@ class QASystem(MarketAnalyzer):
                 )
                 splits = text_splitter.split_documents(documents)
                 
-                self.vector_db = FAISS.from_documents(
-                    documents=splits,
-                    embedding=embedding_model
-                )
+                # Clear memory before vector store creation
+                gc.collect()
+                
+                # Add error handling for FAISS initialization
+                try:
+                    self.vector_db = FAISS.from_documents(
+                        documents=splits,
+                        embedding=embedding_model
+                    )
+                except ModuleNotFoundError as e:
+                    if "faiss.swigfaiss_avx512" in str(e):
+                        logger.info("Falling back to AVX2 FAISS implementation")
+                        # Let it continue as FAISS will automatically fall back
+                    else:
+                        raise
+                
+                # Ensure vector store was created
+                if not self.vector_db:
+                    raise ValueError("Vector store creation failed")
+                    
             except Exception as e:
                 logger.error(f"Error creating vector store: {e}")
-                raise
-                
-            # Create and verify chain
+                return None
+
+            # Create chain with simplified components
             try:
                 template = """Question: {question}
                 Context: {context}
                 Please provide a comprehensive response."""
                 
                 prompt = ChatPromptTemplate.from_template(template)
-                
-                # Initialize LLM
-                llm = ChatOllama(model="mistral")
-                
-                # Create retriever
                 retriever = self.vector_db.as_retriever(search_kwargs={"k": 4})
                 
+                # Create context getter with error handling
                 def get_context(question):
-                    docs = retriever.get_relevant_documents(question)
-                    return "\n".join(doc.page_content for doc in docs)
+                    try:
+                        docs = retriever.get_relevant_documents(question)
+                        context = "\n".join(doc.page_content for doc in docs)
+                        return context
+                    except Exception as e:
+                        logger.error(f"Error getting context: {e}")
+                        return ""
                 
+                # Build chain with minimal configuration
                 chain = (
                     {"context": get_context, "question": RunnablePassthrough()}
                     | prompt 
@@ -1811,16 +1819,21 @@ class QASystem(MarketAnalyzer):
                     | StrOutputParser()
                 )
                 
-                # Verify chain works
-                test_response = chain.invoke("test")
-                if test_response is None:
-                    raise ValueError("Chain verification failed")
+                # Simple chain test
+                try:
+                    test_response = chain.invoke("test")
+                    if test_response:
+                        logger.info("Chain created and tested successfully")
+                        return chain
+                    else:
+                        raise ValueError("Chain test failed - empty response")
+                except Exception as e:
+                    logger.error(f"Chain test failed: {e}")
+                    return None
                     
-                return chain
-                
             except Exception as e:
-                logger.error(f"Error creating chain: {e}")
-                raise
+                logger.error(f"Error creating chain components: {e}")
+                return None
                 
         except Exception as e:
             logger.error(f"Error in create_chain: {e}")
@@ -1870,19 +1883,46 @@ class EnhancedQASystem(QASystem):
 
     # Add the new generate_response method here, right after ask()
     def generate_response(self, query: str) -> Dict[str, Any]:
-        """Generate response with optional visualization"""
+        """
+        Generate comprehensive response with combined visualizations.
+        
+        Args:
+            query: User's question
+            
+        Returns:
+            Dict containing text response and relevant visualizations
+        """
         try:
-            # First try to get text response using ask() which includes chain validation
+            # Get text response first
             text_response = self.ask(query)
             
-            # Only attempt visualization if text response was successful
+            # Only proceed with visualizations if we have valid response and data
             if text_response and not text_response.startswith("Error") and not text_response.startswith("System not ready"):
-                # Only attempt visualization if we have data
-                viz_fig = None
+                figures = []  # List to hold multiple visualizations
+                
                 if hasattr(self, 'data_df') and self.data_df is not None:
-                    viz_type = self._determine_visualization_type(query)
-                    if viz_type:
+                    # Check for different visualization types needed
+                    viz_types = []
+                    
+                    # Price trends
+                    if any(word in query.lower() for word in ['trend', 'price', 'cost', 'value', 'historical']):
+                        if self._get_price_trends_data():
+                            viz_types.append('price_trends')
+                            
+                    # Feature importance 
+                    if any(word in query.lower() for word in ['feature', 'factor', 'impact', 'influence']):
+                        if self._get_feature_importance_data():
+                            viz_types.append('feature_importance')
+                            
+                    # Market analysis
+                    if any(word in query.lower() for word in ['market', 'segment', 'compare', 'analysis']):
+                        if self._get_market_analysis_data():
+                            viz_types.append('market_analysis')
+                    
+                    # Generate all relevant visualizations
+                    for viz_type in viz_types:
                         viz_data = None
+                        
                         if viz_type == 'price_trends':
                             viz_data = self._get_price_trends_data()
                         elif viz_type == 'feature_importance':
@@ -1891,11 +1931,50 @@ class EnhancedQASystem(QASystem):
                             viz_data = self._get_market_analysis_data()
                             
                         if viz_data and hasattr(self, 'viz_generator'):
-                            viz_fig = self.viz_generator.create_visualization(viz_type, viz_data)
+                            fig = self.viz_generator.create_visualization(viz_type, viz_data)
+                            if fig:
+                                # Update layout for consistent look
+                                fig.update_layout(
+                                    height=400,
+                                    margin=dict(l=40, r=40, t=40, b=40),
+                                    template='plotly_white',
+                                    showlegend=True
+                                )
+                                figures.append(fig)
+                    
+                    # Combine figures if we have multiple
+                    if len(figures) > 1:
+                        combined_fig = go.Figure()
+                        row_height = 400  # Height per visualization
+                        
+                        for i, fig in enumerate(figures):
+                            for trace in fig.data:
+                                # Adjust y positions for each visualization
+                                if hasattr(trace, 'y'):
+                                    trace.y = [val + (i * row_height) for val in trace.y]
+                                combined_fig.add_trace(trace)
+                        
+                        # Update layout for combined figure
+                        combined_fig.update_layout(
+                            height=row_height * len(figures),
+                            title="Combined Analysis",
+                            showlegend=True,
+                            template='plotly_white'
+                        )
+                        
+                        return {
+                            'text': text_response,
+                            'visualization': combined_fig
+                        }
+                    elif len(figures) == 1:
+                        return {
+                            'text': text_response,
+                            'visualization': figures[0]
+                        }
                 
                 return {
                     'text': text_response,
-                    'visualization': viz_fig
+                    'visualization': None
                 }
             else:
                 return {
@@ -2136,6 +2215,65 @@ class EnhancedQASystem(QASystem):
             return []
         except Exception:
             return []
+        
+    def _get_price_trends_data(self) -> Dict:
+        """Get enhanced price trends data"""
+        try:
+            if hasattr(self, 'data_df'):
+                df = self.data_df.copy()
+                if 'saledate' in df.columns:
+                    df['date'] = pd.to_datetime(df['saledate'])
+                    # Monthly trends
+                    monthly = df.groupby(df['date'].dt.strftime('%Y-%m'))[['sellingprice']].agg({
+                        'sellingprice': ['mean', 'median', 'count']
+                    }).reset_index()
+                    
+                    return {
+                        'dates': monthly['date'].tolist(),
+                        'mean_price': monthly[('sellingprice', 'mean')].tolist(),
+                        'median_price': monthly[('sellingprice', 'median')].tolist(),
+                        'volume': monthly[('sellingprice', 'count')].tolist()
+                    }
+            return None
+        except Exception:
+            return None
+
+    def _get_feature_importance_data(self) -> Dict:
+        """Get enhanced feature importance data"""
+        try:
+            if hasattr(self, 'predictor') and hasattr(self.predictor, 'best_models'):
+                if 'rf' in self.predictor.best_models:
+                    model = self.predictor.best_models['rf']
+                    importance = dict(zip(
+                        self.predictor.feature_columns,
+                        model.feature_importances_
+                    ))
+                    
+                    # Sort and get top features
+                    sorted_features = dict(sorted(
+                        importance.items(),
+                        key=lambda x: abs(x[1]),
+                        reverse=True
+                    )[:10])
+                    
+                    return {
+                        'features': list(sorted_features.keys()),
+                        'importance': list(sorted_features.values()),
+                        'color_scale': [
+                            'rgb(8,48,107)',
+                            'rgb(8,81,156)',
+                            'rgb(33,113,181)',
+                            'rgb(66,146,198)',
+                            'rgb(107,174,214)',
+                            'rgb(158,202,225)',
+                            'rgb(198,219,239)',
+                            'rgb(222,235,247)',
+                            'rgb(247,251,255)'
+                        ][:len(sorted_features)]
+                    }
+            return None
+        except Exception:
+            return None
 
     def update_chain_with_prediction(self, prediction_id: str):
         """

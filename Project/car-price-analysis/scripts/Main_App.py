@@ -164,6 +164,7 @@ class CombinedCarApp:
             logger.error(f"File upload error: {e}")
             raise
 
+    # In CombinedCarApp class
     def initialize_qa_system(self):
         """Initialize QA system with cloud integration and proper error handling"""
         try:
@@ -175,48 +176,51 @@ class CombinedCarApp:
             
             sources = []
             
-            # Add CSV source if available
+            # Add CSV source if available with cloud path handling
             csv_files = {k: v for k, v in st.session_state.uploaded_files.items() if k.endswith('.csv')}
             if csv_files:
                 most_recent_csv = max(csv_files.items(), key=lambda x: x[1])[1]
+                source_path = most_recent_csv
+                if self.is_cloud:
+                    source_path = f"s3://{os.getenv('AWS_BUCKET_NAME')}/{most_recent_csv}"
+                
                 sources.append({
-                    "path": most_recent_csv,
+                    "path": source_path,
                     "type": "csv",
                     "columns": ['year', 'make', 'model', 'trim', 'body', 'transmission', 
                             'vin', 'state', 'condition', 'odometer', 'color', 'interior', 
                             'seller', 'mmr', 'sellingprice', 'saledate']
                 })
-                logger.info(f"Added CSV source: {most_recent_csv}")
-            
-            # Add PDF files if available
-            pdf_files = {k: v for k, v in st.session_state.uploaded_files.items() if k.endswith('.pdf')}
-            for pdf_path in pdf_files.values():
-                sources.append({
-                    "path": pdf_path,
-                    "type": "pdf"
-                })
-                logger.info(f"Added PDF source: {pdf_path}")
-            
+                logger.info(f"Added CSV source: {source_path}")
+                
             if not sources:
-                logger.error("No valid source files found")
+                logger.error("No valid sources found")
                 return False
-            
-            # Initialize QA system with proper error handling
-            qa_system = EnhancedQASystem(chunk_size=500, chunk_overlap=25)  # Reduced for EC2 free tier
-            chain = qa_system.create_chain(sources)
-            
-            if chain is None:
-                logger.error("Failed to create QA chain")
-                return False
-            
-            st.session_state.qa_system = qa_system
-            st.session_state.chain = chain
-            logger.info("QA System initialized successfully")
-            
-            return True
-            
+                
+            # Initialize QA system with retries
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    qa_system = EnhancedQASystem(chunk_size=500, chunk_overlap=25)  # Reduced chunk size for EC2
+                    chain = qa_system.create_chain(sources)
+                    
+                    if chain is None:
+                        raise ValueError("Chain creation failed")
+                        
+                    st.session_state.qa_system = qa_system
+                    st.session_state.chain = chain
+                    logger.info("QA System initialized successfully")
+                    return True
+                    
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"Failed to initialize QA system after {max_retries} attempts: {e}")
+                        return False
+                    logger.warning(f"Attempt {attempt + 1} failed, retrying...")
+                    time.sleep(2)
+                    
         except Exception as e:
-            logger.error(f"Error initializing QA System: {e}")
+            logger.error(f"Error in QA system initialization: {e}")
             return False
 
     def initialize_security_components(self):
